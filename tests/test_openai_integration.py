@@ -9,8 +9,13 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import numpy as np
 import pytest
+
+# Skip entire module when heavy signal-processing deps are absent (CI without
+# numpy/scipy/fastrtc installed).
+np = pytest.importorskip("numpy", reason="numpy not installed")
+pytest.importorskip("scipy", reason="scipy not installed")
+pytest.importorskip("fastrtc", reason="fastrtc not installed")
 
 # ---------------------------------------------------------------------------
 # Config tests

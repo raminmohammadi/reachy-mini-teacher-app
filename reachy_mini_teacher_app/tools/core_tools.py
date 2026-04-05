@@ -12,7 +12,13 @@ from typing import TYPE_CHECKING, Any, Dict, List
 from pathlib import Path
 from dataclasses import dataclass
 
-from reachy_mini import ReachyMini
+# The robot SDK is only available when running on or connecting to real hardware.
+# In CI / unit-test environments it is intentionally absent — guard against that.
+try:
+    from reachy_mini import ReachyMini
+except ImportError:  # pragma: no cover
+    ReachyMini = object  # type: ignore[assignment,misc]
+
 from reachy_mini_teacher_app.config import DEFAULT_PROFILES_DIRECTORY as DEFAULT_PROFILES_PATH  # noqa: F401
 
 # Import config to ensure .env is loaded before reading REACHY_MINI_CUSTOM_PROFILE
