@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reachy Mini · Live Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="brand">
+        <span class="robot-icon">🤖</span>
+        <span class="brand-name">Reachy Mini</span>
+      </div>
+      <div class="status-badge" id="status-badge">⏳ Connecting…</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <section class="card">
+        <h3>Session</h3>
+        <div class="stat-row"><span class="stat-label">Mode</span><span class="stat-val" id="val-mode">—</span></div>
+        <div class="stat-row"><span class="stat-label">Profile</span><span class="stat-val" id="val-profile">—</span></div>
+        <div class="stat-row"><span class="stat-label">Session ID</span><span class="stat-val" id="val-session">—</span></div>
+        <div class="stat-row"><span class="stat-label">Messages</span><span class="stat-val" id="val-msgs">—</span></div>
+        <div class="stat-row"><span class="stat-label">Started</span><span class="stat-val" id="val-start">—</span></div>
+      </section>
+
+      <section class="card">
+        <h3>Switch Profile</h3>
+        <div id="profile-buttons" class="profile-buttons"></div>
+        <div class="switch-msg" id="switch-msg"></div>
+      </section>
+    </aside>
+
+    <!-- Transcript -->
+    <section class="transcript-panel">
+      <div class="panel-header">
+        <h2>Live Transcript</h2>
+        <button class="btn-clear" onclick="clearView()">Clear view</button>
+      </div>
+      <div class="transcript" id="transcript">
+        <div class="empty-state">Waiting for conversation…</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="main.js"></script>
+</body>
+</html>

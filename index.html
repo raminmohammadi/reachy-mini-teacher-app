@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reachy Mini Local App</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="hero">
+    <div class="hero-inner">
+      <span class="robot-emoji">🤖</span>
+      <h1>Reachy Mini Local App</h1>
+      <p class="tagline">
+        A conversational AI companion for Reachy Mini —<br />
+        powered by <strong>Google Gemini Live</strong> and a fully local AI pipeline.
+      </p>
+      <div class="badge-row">
+        <span class="badge blue">Gemini Live</span>
+        <span class="badge indigo">Local Pipeline</span>
+        <span class="badge purple">English Teacher</span>
+        <span class="badge teal">Weather Tool</span>
+      </div>
+    </div>
+  </div>
+
+  <main class="content">
+
+    <!-- Profiles -->
+    <section class="card-grid">
+      <div class="card">
+        <div class="card-icon">💬</div>
+        <h3>Default Profile</h3>
+        <p>A warm Farsi-speaking AI companion for everyday conversation, with real-time head tracking, expressive emotions, and live weather lookup.</p>
+      </div>
+      <div class="card">
+        <div class="card-icon">🧑‍🏫</div>
+        <h3>English Teacher</h3>
+        <p>A structured 7-unit curriculum designed for elderly Persian speakers learning English. Conversational, patient, and progress-aware across sessions.</p>
+      </div>
+    </section>
+
+    <!-- How it works -->
+    <section class="section">
+      <h2>How It Works</h2>
+      <div class="steps">
+        <div class="step">
+          <div class="step-num">1</div>
+          <div>
+            <strong>Connect</strong> — The app connects to your Reachy Mini over USB or Wi-Fi.
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">2</div>
+          <div>
+            <strong>Listen</strong> — Real-time audio streams from the robot's microphone to the AI backend.
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">3</div>
+          <div>
+            <strong>Think</strong> — Gemini Live (or the local Whisper + Ollama pipeline) generates a response and selects robot actions.
+          </div>
+        </div>
+        <div class="step">
+          <div class="step-num">4</div>
+          <div>
+            <strong>Respond</strong> — The robot speaks, moves its head, plays an emotion, and remembers the conversation for next time.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tools -->
+    <section class="section">
+      <h2>Built-in Tools</h2>
+      <div class="tool-grid">
+        <div class="tool"><span>🎯</span> Head tracking</div>
+        <div class="tool"><span>😊</span> Emotions &amp; dance</div>
+        <div class="tool"><span>🌤️</span> Live weather (Open-Meteo)</div>
+        <div class="tool"><span>📷</span> Camera &amp; scene description</div>
+        <div class="tool"><span>🔀</span> Profile switching</div>
+        <div class="tool"><span>💾</span> Session memory</div>
+      </div>
+    </section>
+
+    <!-- Install -->
+    <section class="section install">
+      <h2>Get Started</h2>
+      <pre><code>pip install reachy_mini_teacher_app
+reachy-mini-local-app</code></pre>
+      <p class="install-note">Requires Python ≥ 3.10 and a <code>GEMINI_API_KEY</code>. See <a href="https://huggingface.co/blog/pollen-robotics/make-and-publish-your-reachy-mini-apps" target="_blank">the guide</a> to run via the dashboard.</p>
+    </section>
+
+  </main>
+
+  <footer>
+    <p>Built with ❤️ for <a href="https://pollen-robotics.com" target="_blank">Pollen Robotics</a> · Apache 2.0 license</p>
+  </footer>
+</body>
+</html>

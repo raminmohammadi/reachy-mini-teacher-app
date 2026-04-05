@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reachy_mini_teacher_app"
+version = "0.2.0"
+authors = [{ name = "Pollen Robotics", email = "contact@pollen-robotics.com" }]
+description = "Reachy Mini app with Gemini Live and fully local AI pipeline (no OpenAI)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Media / WebRTC
+    "aiortc>=1.13.0",
+    "fastrtc>=0.0.34",
+    "gradio>=5.0.0",
+    # Environment variables
+    "python-dotenv",
+    # Reachy mini SDK
+    "reachy_mini_dances_library",
+    "reachy_mini_toolbox",
+    "reachy-mini>=1.5.1",
+    "eclipse-zenoh~=1.7.0",
+    # Gemini Live API
+    "google-genai>=1.0.0",
+    # Local LLM via Ollama
+    "ollama>=0.4.0",
+    # Local STT via Faster-Whisper (includes VAD)
+    "faster-whisper>=1.0.0",
+    # Local TTS via Kokoro-ONNX
+    "kokoro-onnx>=0.4.0",
+    # HTTP (used by check_weather tool via Open-Meteo)
+    "requests>=2.28.0",
+    # Web UI server
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    # Audio / image utilities
+    "scipy>=1.11.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.12.0.88",
+    "huggingface-hub>=0.20.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+local_vision = [
+  "torch>=2.1",
+  "transformers>=4.40.0",
+  "num2words",
+]
+yolo_vision = [
+  "ultralytics",
+  "supervision",
+]
+mediapipe_vision = [
+  "mediapipe==0.10.14",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "ruff",
+  "mypy",
+  "pre-commit",
+]
+
+[project.scripts]
+reachy-mini-teacher-app = "reachy_mini_teacher_app.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reachy_mini_teacher_app*"]
+
+[tool.setuptools.package-data]
+reachy_mini_teacher_app = [
+  "images/*",
+  ".env.example",
+  "profiles/**/*.txt",
+  "prompts/**/*.txt",
+  "static/*",
+]
+
