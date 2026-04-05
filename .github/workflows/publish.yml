@@ -1,0 +1,66 @@
+name: CI / Publish to HuggingFace
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Only one publish can run at a time; tests are unrestricted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Tests ────────────────────────────────────────────────────────────────
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install CI dependencies
+        run: |
+          pip install pytest pytest-asyncio python-dotenv
+          # Install the package without hardware-specific robot SDK dependencies.
+          # The robot SDK (reachy_mini, eclipse-zenoh) requires native libs that
+          # are only available on physical hardware.  core_tools.py guards this
+          # with a try/except so the import never fails in CI.
+          pip install --no-deps -e .
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ── Publish ──────────────────────────────────────────────────────────────
+  publish:
+    name: Publish to HuggingFace Space
+    needs: test
+    # Only run on direct pushes to main (i.e. merged PRs), never on PRs.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install HuggingFace Hub
+        run: pip install --upgrade "huggingface_hub>=0.20.0"
+
+      - name: Publish to HuggingFace Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python scripts/publish_to_hf.py
