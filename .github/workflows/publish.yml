@@ -31,11 +31,11 @@ jobs:
 
       - name: Install CI dependencies
         run: |
-          pip install pytest pytest-asyncio python-dotenv
+          pip install pytest pytest-asyncio python-dotenv pydantic
           # Install the package without hardware-specific robot SDK dependencies.
-          # The robot SDK (reachy_mini, eclipse-zenoh) requires native libs that
-          # are only available on physical hardware.  core_tools.py guards this
-          # with a try/except so the import never fails in CI.
+          # The robot SDK (reachy_mini, eclipse-zenoh, numpy, scipy, fastrtc)
+          # requires native libs only available on physical hardware.  Guarded
+          # imports throughout the package ensure nothing fails in CI.
           pip install --no-deps -e .
 
       - name: Run tests

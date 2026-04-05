@@ -5,8 +5,19 @@ import argparse
 import warnings
 from typing import Any, Tuple, Optional
 
-from reachy_mini import ReachyMini
-from reachy_mini_teacher_app.camera_worker import CameraWorker
+# reachy_mini and camera_worker both depend on hardware libraries (numpy,
+# scipy, reachy_mini SDK) that are absent in CI.  Guard both so the module
+# is safely importable in lightweight environments; only runtime paths that
+# actually use these objects (handle_vision_stuff) need them present.
+try:
+    from reachy_mini import ReachyMini  # type: ignore[import-untyped]
+except ImportError:
+    ReachyMini = None  # type: ignore[assignment,misc]
+
+try:
+    from reachy_mini_teacher_app.camera_worker import CameraWorker
+except ImportError:
+    CameraWorker = None  # type: ignore[assignment,misc]
 
 
 def parse_args() -> Tuple[argparse.Namespace, list]:  # type: ignore
