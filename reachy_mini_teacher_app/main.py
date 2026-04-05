@@ -24,10 +24,14 @@ import logging
 import threading
 from pathlib import Path
 
-from reachy_mini import ReachyMini
+# reachy_mini is only available on the physical robot.
+# Both imports are guarded so the module (and therefore the package) can be
+# imported safely in CI and on developer machines without robot hardware.
+try:
+    from reachy_mini import ReachyMini  # type: ignore[import-untyped]
+except ImportError:
+    ReachyMini = None  # type: ignore[assignment,misc]
 
-# ReachyMiniApp base class is provided by reachy-mini >= 1.5.x.
-# Fall back to plain object so the package stays importable on older installs.
 try:
     from reachy_mini import ReachyMiniApp as _ReachyMiniAppBase  # type: ignore[attr-defined]
 except ImportError:
