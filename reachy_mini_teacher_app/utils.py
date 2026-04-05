@@ -1,4 +1,7 @@
 """Shared utilities for argument parsing, logging, and vision setup."""
+from __future__ import annotations  # keep all annotations as strings — prevents
+                                    # evaluation of guarded types (ReachyMini /
+                                    # CameraWorker) that may be None in CI.
 
 import logging
 import argparse
