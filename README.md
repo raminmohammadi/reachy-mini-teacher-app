@@ -1,5 +1,5 @@
 ---
-title: Reachy Mini Local App
+title: Reachy Mini Teacher App
 emoji: 🤖
 colorFrom: indigo
 colorTo: blue

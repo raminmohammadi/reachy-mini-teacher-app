@@ -26,7 +26,7 @@ from pathlib import Path
 # ── Configuration ────────────────────────────────────────────────────────────
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_NAME = "reachy_mini_teacher_app"
+PACKAGE_NAME = "reachy-mini-teacher-app"
 
 # Files and directories that are never uploaded to the Space.
 IGNORE_PATTERNS = [
