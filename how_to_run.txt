@@ -1,0 +1,11 @@
+cd reachy_mini_teacher_app
+pip install -e .
+
+# Gemini Live (real-time bidirectional audio+vision+tools):
+reachy-mini-local-app --mode gemini
+
+# Fully local (Whisper STT + Ollama LLM + Kokoro TTS):
+reachy-mini-local-app --mode local
+
+# Local + SmolVLM2 camera tool:
+reachy-mini-local-app --mode local --local-vision
