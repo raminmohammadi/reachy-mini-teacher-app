@@ -21,45 +21,45 @@ logger = logging.getLogger(__name__)
 
 _SUMMARIZE_PROMPT = """\
 You are an AI session analyst for a Farsi-speaking elderly English learner program.
-You will receive a transcript and, if available, today's lesson unit details.
+You will receive a session transcript and, if available, today's lesson unit details.
 
-Produce your response in EXACTLY this format (in Farsi):
+Produce your response in EXACTLY this structured format (all fields in Farsi):
 
-نتیجه: قبول
-خلاصه: [3-6 sentence summary in Farsi]
+کاربر: [نام کاربر را از مکالمه استخراج کن. اگر مشخص نیست بنویس: «نامشخص»]
+نتیجه: [قبول یا مردود]
+تمرین‌شده: [لیست عباراتی که کاربر در این جلسه تمرین کرد — هر عبارت انگلیسی را در گیومه بنویس]
+عملکرد: [ارزیابی صادقانه و دقیق: کدام عبارات را درست گفت، کدام را اشتباه، چه مشکلات تلفظی داشت]
+تکرار: [عباراتی که باید دفعه بعد دوباره تمرین شوند — با دلیل کوتاه]
+ادامه: [چه موضوع یا عباراتی باید دفعه بعد ادامه داده یا معرفی شوند]
+یادداشت: [هر نکته مهم دیگری برای معلم — سرعت یادگیری، اعتماد به نفس، خستگی، و غیره]
 
-OR if the student did not pass:
+قوانین نتیجه (قبول/مردود):
+- «قبول»: فقط اگر کاربر حداقل ۳ عبارت هدف را درست و با اطمینان استفاده کرده.
+- «مردود»: اگر جلسه کوتاه بود، کاربر تلاش زیادی نکرد، یا کمتر از ۳ عبارت تمرین شد.
 
-نتیجه: مردود
-خلاصه: [3-6 sentence summary in Farsi]
-
-Rules for نتیجه (pass/fail):
-- Mark "قبول" ONLY if the student correctly and confidently used at least 3 of
-  today's target phrases in context during the session.
-- Mark "مردود" if: the session was too short, the student struggled significantly,
-  fewer than 3 phrases were practiced, or the session was off-topic.
-
-Rules for خلاصه:
-- Write ONLY in Farsi.
-- Cover: what phrases were practiced, how the student performed (honestly but kindly),
-  and a note on what to repeat or continue next time.
-- If the session was too short (< 4 messages), write:
-  "جلسه بسیار کوتاه بود — موضوع خاصی تمرین نشد."
-- Do NOT include greetings or filler.
+اگر جلسه کمتر از ۴ پیام داشت، تمام فیلدها را با «جلسه بسیار کوتاه بود» پر کن و نتیجه را «مردود» بگذار.
 
 {unit_section}
-Transcript:
+متن مکالمه:
 {transcript}
 """
 
 _UNIT_SECTION_TEMPLATE = """\
-Today's lesson unit: واحد {unit_id} — {unit_name}
-Target phrases: {phrases}
+واحد درسی امروز: واحد {unit_id} — {unit_name}
+عبارات هدف: {phrases}
 
 """
 
 _SHORT_SESSION_RESULT = {
-    "summary": "جلسه بسیار کوتاه بود — موضوع خاصی تمرین نشد.",
+    "summary": (
+        "کاربر: نامشخص\n"
+        "نتیجه: مردود\n"
+        "تمرین‌شده: —\n"
+        "عملکرد: جلسه بسیار کوتاه بود — موضوع خاصی تمرین نشد.\n"
+        "تکرار: همه عبارات واحد فعلی\n"
+        "ادامه: از ابتدای واحد شروع کن\n"
+        "یادداشت: جلسه کوتاه بود"
+    ),
     "passed": False,
 }
 
@@ -71,18 +71,18 @@ _SHORT_SESSION_RESULT = {
 async def generate_session_summary(
     messages: List[Dict[str, Any]],
     daily_plan: Optional[Dict[str, Any]] = None,
+    user_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Generate a summary and pass/fail verdict from session messages.
+    """Generate a structured summary and pass/fail verdict from session messages.
 
     Args:
-        messages: List of {role, content, timestamp} dicts from the session.
-        daily_plan: Optional dict with keys unit_id, unit_name, phrases
-                    (from SessionDB.get_or_create_daily_plan). When provided,
-                    the LLM evaluates whether the student passed today's unit.
+        messages:    List of {role, content, timestamp} dicts from the session.
+        daily_plan:  Optional dict with keys unit_id, unit_name, phrases.
+        user_name:   Known user name to embed in the summary.
 
     Returns:
         Dict with keys:
-            "summary" (str | None) — Farsi summary text for DB storage.
+            "summary" (str | None) — Structured Farsi summary for DB storage.
             "passed"  (bool)       — Whether the student passed today's unit.
     """
     if not messages:
@@ -90,7 +90,10 @@ async def generate_session_summary(
 
     if len(messages) < 4:
         logger.info("Session too short (%d messages) — skipping summarization", len(messages))
-        return _SHORT_SESSION_RESULT
+        short = dict(_SHORT_SESSION_RESULT)
+        if user_name:
+            short["summary"] = short["summary"].replace("کاربر: نامشخص", f"کاربر: {user_name}")
+        return short
 
     # Build transcript text
     lines: List[str] = []
@@ -136,22 +139,21 @@ async def generate_session_summary(
 # ---------------------------------------------------------------------------
 
 def _parse_result(raw: str) -> Dict[str, Any]:
-    """Parse the LLM response into {summary, passed}."""
-    passed = False
-    summary_lines: List[str] = []
+    """Parse the structured LLM response into {summary, passed}.
 
+    The new format has labelled fields: کاربر, نتیجه, تمرین‌شده, عملکرد, تکرار, ادامه, یادداشت.
+    We keep the full structured text as the summary (for rich prompt injection)
+    and extract only the نتیجه field for the pass/fail boolean.
+    """
+    passed = False
     for line in raw.splitlines():
         stripped = line.strip()
         if stripped.startswith("نتیجه:"):
             verdict = stripped.replace("نتیجه:", "").strip()
             passed = "قبول" in verdict
-        elif stripped.startswith("خلاصه:"):
-            summary_lines.append(stripped.replace("خلاصه:", "").strip())
-        elif summary_lines:
-            # Continuation lines of the summary
-            summary_lines.append(stripped)
+            break
 
-    summary = " ".join(s for s in summary_lines if s) or raw.strip()
+    summary = raw.strip()
     logger.info("Session verdict: %s | summary length: %d chars", "PASS" if passed else "FAIL", len(summary))
     return {"summary": summary, "passed": passed}
 

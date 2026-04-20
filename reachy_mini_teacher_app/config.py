@@ -51,7 +51,11 @@ class Config:
 
     # ── Gemini ────────────────────────────────────────────────────────────
     GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "models/gemini-3.1-flash-live-preview")
+    # gemini-3.1-flash-live-preview is the confirmed-working Live API model on
+    # v1beta (Google AI Studio).  Native-audio models (2.5-flash-native-audio-*)
+    # require v1alpha and a different API key tier — use GEMINI_MODEL env var to
+    # switch when that becomes available on your account.
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview")
 
     # ── OpenAI ────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
@@ -79,6 +83,17 @@ class Config:
     SESSION_DB_PATH: str | None = os.getenv("SESSION_DB_PATH")
     VAD_SILENCE_DURATION_MS: int = int(os.getenv("VAD_SILENCE_DURATION_MS", "0"))  # 0 = use backend default
     VAD_PREFIX_PADDING_MS: int = int(os.getenv("VAD_PREFIX_PADDING_MS", "0"))
+
+    # ── English Teacher users ─────────────────────────────────────────────
+    # Comma-separated list of allowed user names, e.g. "Alice,Bob".
+    # The AI will identify the speaker by voice and confirm against this list.
+    # Leave empty to let the AI ask for any name freely.
+    _users_env = os.getenv("ENGLISH_TEACHER_USERS", "")
+    ENGLISH_TEACHER_USERS: list[str] = (
+        [u.strip() for u in _users_env.split(",") if u.strip()]
+        if _users_env.strip()
+        else []
+    )
 
     # ── Profiles / tools ─────────────────────────────────────────────────
     _profiles_directory_env = os.getenv("REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY")

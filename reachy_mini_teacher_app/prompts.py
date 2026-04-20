@@ -58,17 +58,33 @@ def _expand_prompt_includes(content: str) -> str:
     return '\n'.join(expanded_lines)
 
 
+_LEVEL_LABELS = {1: "مبتدی", 2: "متوسط", 3: "پیشرفته"}
+
+
+def _build_known_users_text() -> str:
+    """Build the {known_users_list} block from ENGLISH_TEACHER_USERS config."""
+    users = config.ENGLISH_TEACHER_USERS
+    if not users:
+        return "کاربران این دستگاه تعریف نشده‌اند — از کاربر بپرس اسمش چیست."
+    if len(users) == 1:
+        return f"فقط یک نفر از این دستگاه استفاده می‌کند: **{users[0]}**"
+    items = "\n".join(f"- **{u}**" for u in users)
+    return f"کاربران این دستگاه:\n{items}"
+
+
 def get_session_instructions(
     recap: str | None = None,
     daily_plan: str | None = None,
     user_name: str | None = None,
+    user_level: int | None = None,
 ) -> str:
     """Get session instructions, loading from REACHY_MINI_CUSTOM_PROFILE if set.
 
     Args:
-        recap: Optional recap text for {previous_session_recap} placeholder.
+        recap:      Optional recap text for {previous_session_recap} placeholder.
         daily_plan: Formatted daily plan text for {todays_plan} placeholder.
-        user_name: Known user name for {known_user_name} placeholder.
+        user_name:  Known user name for {known_user_name} placeholder.
+        user_level: Student's assessed level 1-3 for {user_level_info} placeholder.
     """
     profile = config.REACHY_MINI_CUSTOM_PROFILE
     if not profile:
@@ -91,10 +107,24 @@ def get_session_instructions(
             if instructions:
                 # Expand [<name>] placeholders with content from prompts library
                 expanded_instructions = _expand_prompt_includes(instructions)
+                # Inject configurable user list (replaces hard-coded names)
+                expanded_instructions = expanded_instructions.replace(
+                    "{known_users_list}", _build_known_users_text()
+                )
                 # Inject known user name
                 name_text = user_name if user_name else ""
                 expanded_instructions = expanded_instructions.replace(
                     "{known_user_name}", name_text
+                )
+                # Inject user level info ({user_level_info} placeholder)
+                if user_level:
+                    level_clamped = max(1, min(3, int(user_level)))
+                    label = _LEVEL_LABELS.get(level_clamped, "مبتدی")
+                    level_text = f"سطح فعلی: **{label}** (سطح {level_clamped} از ۳)"
+                else:
+                    level_text = "سطح فعلی: هنوز ارزیابی نشده — در ابتدای جلسه ارزیابی کن."
+                expanded_instructions = expanded_instructions.replace(
+                    "{user_level_info}", level_text
                 )
                 # Inject daily plan (english_teacher uses {todays_plan})
                 plan_text = daily_plan if daily_plan else ""

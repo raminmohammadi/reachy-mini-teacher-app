@@ -101,8 +101,6 @@ class GeminiLiveHandler(AsyncStreamHandler):
         self._session_state: Dict[str, Any] = {"session_id": None}
         deps.session_db = self._db
         deps.session_state = self._session_state
-        # Session resumption token — keeps Gemini context across reconnects
-        self._resumption_token: Optional[str] = None
         # Track whether this is the first connection (for intro vs resume behavior)
         self._is_first_connection = True
         # Cached config — reused across reconnects so Gemini sees identical config
@@ -114,8 +112,10 @@ class GeminiLiveHandler(AsyncStreamHandler):
         # Daily curriculum plan — set once when the session starts
         self._daily_plan: Optional[Dict[str, Any]] = None
         self._today_date: Optional[str] = None
-        # Known user name — looked up at session start, shown in prompt
+        # Known user name, id and level — looked up at session start, shown in prompt
         self._known_user_name: Optional[str] = None
+        self._known_user_id: Optional[int] = None
+        self._known_user_level: int = 1  # 1=beginner, 2=intermediate, 3=advanced
 
     def copy(self) -> "GeminiLiveHandler":
         return GeminiLiveHandler(self.deps, self.gradio_mode)
@@ -154,13 +154,17 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 pass
 
     async def _generate_session_summary(self) -> Optional[Dict[str, Any]]:
-        """Generate a summary and pass/fail verdict for the current session."""
+        """Generate a structured summary and pass/fail verdict for the current session."""
         if self._session_id is None:
             return None
         try:
             from reachy_mini_teacher_app.session_summarizer import generate_session_summary
             messages = self._db.get_session_messages(self._session_id)
-            return await generate_session_summary(messages, daily_plan=self._daily_plan)
+            return await generate_session_summary(
+                messages,
+                daily_plan=self._daily_plan,
+                user_name=self._known_user_name,
+            )
         except Exception as e:
             logger.error("Failed to generate session summary: %s", e)
             return None
@@ -169,40 +173,21 @@ class GeminiLiveHandler(AsyncStreamHandler):
     # Session lifecycle
     # ------------------------------------------------------------------
 
-    def _get_resumption_config(self, gtypes: Any) -> Any:
-        """Create SessionResumptionConfig dynamically to support different SDK versions."""
-        kwargs = {}
-        try:
-            fields = gtypes.SessionResumptionConfig.model_fields
-        except AttributeError:
-            try:
-                fields = gtypes.SessionResumptionConfig.__fields__
-            except AttributeError:
-                fields = {"resumption_token": None, "handle": None}
-        
-        if "resumption_token" in fields:
-            kwargs["resumption_token"] = self._resumption_token
-        elif "handle" in fields:
-            kwargs["handle"] = self._resumption_token
-        else:
-            kwargs["resumption_token"] = self._resumption_token
-            
-        return gtypes.SessionResumptionConfig(**kwargs)
-
     def _build_live_config(self, gtypes: Any) -> Any:
         """Build or return cached LiveConnectConfig.
 
-        The config is only rebuilt when ``_needs_config_rebuild`` is True
-        (first connect or after a profile switch), OR when we don't have a 
-        resumption token (meaning we are starting fresh and can inject the transcript).
-        On normal reconnects with a token, the cached config is reused so that 
-        Gemini sees an **identical** config and session resumption works reliably.
+        Session resumption is disabled (it caused the server to close sessions
+        after every AI turn). The config is always rebuilt so that the injected
+        transcript is always current when a genuine network reconnect occurs.
         """
-        rebuild = self._needs_config_rebuild or self._cached_live_config is None or not self._resumption_token
+        rebuild = True  # always rebuild — transcript must be current on each connect
 
         if rebuild:
-            # Fetch real summaries from previous sessions (works without user-ID linkage).
-            recap = self._db.get_recent_session_recap(current_session_id=self._session_id)
+            # Fetch summaries filtered by user so users never see each other's history.
+            recap = self._db.get_recent_session_recap(
+                current_session_id=self._session_id,
+                user_id=self._known_user_id,
+            )
 
             # Inject today's daily plan if one is active (english_teacher profile)
             daily_plan_text: Optional[str] = None
@@ -213,22 +198,31 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 recap=recap,
                 daily_plan=daily_plan_text,
                 user_name=self._known_user_name,
+                user_level=self._known_user_level,
             )
 
             # On a mid-session reconnect (no resumption token, but session already has messages)
-            # inject the transcript so the AI continues naturally instead of restarting.
+            # inject a SHORT tail of the transcript so the AI knows where it left off.
+            # Limit to the last 20 lines — injecting the full growing transcript causes the
+            # system-prompt to exceed the server's context budget, which closes the session
+            # every ~6 seconds creating an infinite reconnect loop.
+            _MAX_TRANSCRIPT_LINES = 20
             if self._session_id is not None and not self._profile_just_switched:
                 transcript = self._db.build_current_session_transcript(self._session_id)
                 if transcript:
+                    lines = transcript.splitlines()
+                    if len(lines) > _MAX_TRANSCRIPT_LINES:
+                        lines = lines[-_MAX_TRANSCRIPT_LINES:]
+                        transcript = "\n".join(lines)
                     instructions = (
                         "## این اتصال ادامه یک مکالمه قطع‌شده است.\n"
                         "- سلام نکن، خودت را معرفی نکن، و اسم کاربر را دوباره نپرس.\n"
                         "- مکالمه را از همان‌جا که ماند ادامه بده.\n\n"
                         + instructions
-                        + "\n\n## مکالمه جاری (برای ادامه):\n"
+                        + "\n\n## آخرین پیام‌های مکالمه (برای ادامه):\n"
                         + transcript
                     )
-                    logger.info("Injected resumed-session transcript (%d lines)", transcript.count('\n') + 1)
+                    logger.info("Injected resumed-session transcript (%d lines)", len(lines))
 
             # Minimal, non-conflicting behavioral guardrails.
             instructions += (
@@ -246,19 +240,27 @@ class GeminiLiveHandler(AsyncStreamHandler):
             tool_specs = get_tool_specs()
             gemini_tools = _tool_specs_to_gemini(tool_specs, gtypes) if tool_specs else []
 
-            # Build realtime input config for VAD tuning
-            realtime_input_kwargs: Dict[str, Any] = {}
-            silence_ms = config.VAD_SILENCE_DURATION_MS
-            prefix_ms = config.VAD_PREFIX_PADDING_MS
-            if silence_ms > 0 or prefix_ms > 0:
-                aad_kwargs: Dict[str, Any] = {}
-                if silence_ms > 0:
-                    aad_kwargs["silenceDurationMs"] = silence_ms
-                if prefix_ms > 0:
-                    aad_kwargs["prefixPaddingMs"] = prefix_ms
-                aad_kwargs["endOfSpeechSensitivity"] = "END_SENSITIVITY_LOW"
-                realtime_input_kwargs["automaticActivityDetection"] = gtypes.AutomaticActivityDetection(**aad_kwargs)
-                logger.info("VAD tuning: silence=%dms prefix=%dms sensitivity=LOW", silence_ms, prefix_ms)
+            # Build realtime input config for VAD tuning.
+            #
+            # We ALWAYS set END_SENSITIVITY_LOW regardless of whether the
+            # operator has overridden the silence/prefix durations.  The default
+            # HIGH sensitivity cuts off non-native / accented speakers mid-sentence,
+            # forcing them to repeat themselves 2-3 times before the model responds.
+            # LOW sensitivity waits longer before declaring end-of-speech, which
+            # is the right tradeoff for a language-learning / elderly-user app.
+            silence_ms = config.VAD_SILENCE_DURATION_MS or 1200   # ms; 1.2 s comfortable pause
+            prefix_ms  = config.VAD_PREFIX_PADDING_MS  or 300     # ms; capture utterance start
+            # NOTE: all field names MUST be snake_case — the SDK's Pydantic models
+            # silently ignore unknown camelCase keys, so wrong names = no effect.
+            aad = gtypes.AutomaticActivityDetection(
+                end_of_speech_sensitivity=gtypes.EndSensitivity.END_SENSITIVITY_LOW,
+                silence_duration_ms=silence_ms,
+                prefix_padding_ms=prefix_ms,
+            )
+            realtime_input_config = gtypes.RealtimeInputConfig(
+                automatic_activity_detection=aad,
+            )
+            logger.info("VAD tuning: silence=%dms prefix=%dms sensitivity=LOW", silence_ms, prefix_ms)
 
             self._cached_live_config = gtypes.LiveConnectConfig(
                 response_modalities=[gtypes.Modality.AUDIO],
@@ -269,20 +271,17 @@ class GeminiLiveHandler(AsyncStreamHandler):
                         prebuilt_voice_config=gtypes.PrebuiltVoiceConfig(voice_name=voice_name),
                     ),
                 ),
-                realtimeInputConfig=gtypes.RealtimeInputConfig(**realtime_input_kwargs) if realtime_input_kwargs else None,
+                realtime_input_config=realtime_input_config,
                 input_audio_transcription=gtypes.AudioTranscriptionConfig(),
                 output_audio_transcription=gtypes.AudioTranscriptionConfig(),
-                session_resumption=self._get_resumption_config(gtypes),
-                # context_window_compression intentionally omitted:
-                # SlidingWindow() with default token threshold closes the session
-                # every ~10-15 s, causing the AI to resume mid-question and repeat
-                # the same question endlessly.
+                # session_resumption intentionally omitted:
+                # When enabled, the Gemini server actively closes the session after
+                # every complete AI turn and sends a resumption token, causing a
+                # 6-8 second reconnect loop for every response.  Without it, the
+                # session stays open for the entire conversation.
             )
             self._needs_config_rebuild = False
-            logger.info("Built new LiveConnectConfig (resumption_token=%s)", "yes" if self._resumption_token else "no")
-        else:
-            # Only update the resumption handle — everything else stays identical
-            self._cached_live_config.session_resumption = self._get_resumption_config(gtypes)
+            logger.info("Built new LiveConnectConfig (session_resumption=disabled)")
 
         return self._cached_live_config
 
@@ -307,10 +306,18 @@ class GeminiLiveHandler(AsyncStreamHandler):
         self._session_state["session_id"] = self._session_id
         logger.info("Database session started: %d", self._session_id)
 
-        # Look up known user name from previous sessions
+        # Look up known user name, id and level from previous sessions
         self._known_user_name = self._db.get_most_recent_user_name()
         if self._known_user_name:
-            logger.info("Known user from previous session: '%s'", self._known_user_name)
+            self._known_user_id = self._db.get_or_create_user(self._known_user_name)
+            self._known_user_level = self._db.get_user_level(self._known_user_name)
+            logger.info(
+                "Known user from previous session: '%s' (id=%s, level=%d)",
+                self._known_user_name, self._known_user_id, self._known_user_level,
+            )
+        else:
+            self._known_user_id = None
+            self._known_user_level = 1
 
         # Load today's curriculum plan (only for english_teacher profile)
         from reachy_mini_teacher_app.config import config as _cfg
@@ -341,8 +348,6 @@ class GeminiLiveHandler(AsyncStreamHandler):
             if self._profile_switch_event.is_set():
                 self._profile_switch_event.clear()
                 reinitialize_tools()
-                # Clear resumption token — new profile means new system prompt
-                self._resumption_token = None
                 self._is_first_connection = True
                 self._needs_config_rebuild = True
                 self._profile_just_switched = True
@@ -355,7 +360,13 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 self._daily_plan = None
                 self._today_date = None
                 self._known_user_name = self._db.get_most_recent_user_name()
-                logger.info("Profile switch detected — new DB session %d, resumption token cleared", self._session_id)
+                if self._known_user_name:
+                    self._known_user_id = self._db.get_or_create_user(self._known_user_name)
+                    self._known_user_level = self._db.get_user_level(self._known_user_name)
+                else:
+                    self._known_user_id = None
+                    self._known_user_level = 1
+                logger.info("Profile switch detected — new DB session %d", self._session_id)
 
             live_config = self._build_live_config(gtypes)
 
@@ -407,18 +418,10 @@ class GeminiLiveHandler(AsyncStreamHandler):
                         send_task.cancel()
                         recv_task.cancel()
                         break
-                    finally:
-                        # Always discard the resumption token after a session closes.
-                        # Session resumption restores the AI to the exact moment it was
-                        # speaking — BEFORE the user's last response — so it re-asks the
-                        # same question on reconnect. Clearing the token forces a full
-                        # transcript rebuild, giving the AI the real conversation state.
-                        self._resumption_token = None
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Gemini Live session error: %s", e)
-                self._resumption_token = None
 
             if self._shutdown_requested:
                 break
@@ -493,24 +496,19 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 logger.debug("send_realtime_input error (session closing?): %s", e)
 
     async def _recv_loop(self, session: Any) -> None:
-        """Receive Gemini responses: audio, transcripts, and tool calls."""
+        """Receive Gemini responses: audio, transcripts, and tool calls.
+
+        Note: session.receive() breaks out of the loop after every turn_complete
+        (SDK bug: https://github.com/googleapis/python-genai/issues/2244).
+        We use session._receive() directly to keep the loop alive for all turns.
+        """
         try:
-            async for response in session.receive():
+            while True:
+                response = await session._receive()
+                if response is None:
+                    break
                 if self._shutdown_requested:
                     break
-
-                # Session resumption token — save for next reconnect
-                if getattr(response, "session_resumption_update", None) is not None:
-                    sru = response.session_resumption_update
-                    token = getattr(sru, "resumption_token", None) or getattr(sru, "new_handle", None)
-                    if not token and hasattr(sru, "handle"):
-                        token = sru.handle
-                    if token:
-                        self._resumption_token = token
-                        logger.debug("Session resumption token updated")
-                    if getattr(sru, "resumable", None) is False:
-                        logger.warning("Session marked as non-resumable")
-                        self._resumption_token = None
 
                 # GoAway — server will close soon
                 if getattr(response, "go_away", None) is not None:
