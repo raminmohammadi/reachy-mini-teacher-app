@@ -10,3 +10,4 @@ switch_persona
 check_weather
 remember_user_name
 switch_user
+set_user_level

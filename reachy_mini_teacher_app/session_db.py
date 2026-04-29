@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DB_PATH = Path.home() / ".reachy_mini" / "sessions.db"
+# Store the database next to the project root so it is easy to inspect,
+# back up, and share between runs without hunting through the home directory.
+# Path layout:  <project_root>/reachy_mini_teacher_app/session_db.py
+#               → .parent       = reachy_mini_teacher_app/
+#               → .parent.parent = <project_root>/
+_DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "sessions.db"
 
 # ---------------------------------------------------------------------------
 # Curriculum definition — single source of truth for unit IDs, names, phrases
@@ -123,6 +128,16 @@ class SessionDB:
             );
         """)
         self._conn.commit()
+        # Additive migrations — safe to run every startup (idempotent).
+        # ALTER TABLE fails silently if the column already exists.
+        try:
+            self._conn.execute(
+                "ALTER TABLE users ADD COLUMN level INTEGER NOT NULL DEFAULT 1"
+            )
+            self._conn.commit()
+            logger.info("Migration: added 'level' column to users table")
+        except Exception:
+            pass  # Column already exists — nothing to do
 
     def close(self) -> None:
         if self._conn:
@@ -158,8 +173,40 @@ class SessionDB:
 
     def list_users(self) -> List[Dict[str, Any]]:
         assert self._conn is not None
-        rows = self._conn.execute("SELECT id, name, created_at FROM users").fetchall()
+        rows = self._conn.execute("SELECT id, name, created_at, level FROM users").fetchall()
         return [dict(r) for r in rows]
+
+    def get_user_level(self, name: str) -> int:
+        """Return the student's level (1=beginner, 2=intermediate, 3=advanced).
+
+        Defaults to 1 when the user is new or level has never been set.
+        """
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT level FROM users WHERE LOWER(name) = ?", (name.strip().lower(),)
+        ).fetchone()
+        return max(1, min(3, int(row["level"]))) if row and row["level"] else 1
+
+    def set_user_level(self, name: str, level: int) -> None:
+        """Persist the student's assessed level (clamped to 1–3)."""
+        assert self._conn is not None
+        level = max(1, min(3, int(level)))
+        self._conn.execute(
+            "UPDATE users SET level = ? WHERE LOWER(name) = ?",
+            (level, name.strip().lower()),
+        )
+        self._conn.commit()
+        logger.info("Updated level for user '%s' → %d", name, level)
+
+    def get_user_name_for_session(self, session_id: int) -> Optional[str]:
+        """Return the display name of the user linked to a session, or None."""
+        assert self._conn is not None
+        row = self._conn.execute(
+            "SELECT u.name FROM sessions s JOIN users u ON s.user_id = u.id "
+            "WHERE s.id = ?",
+            (session_id,),
+        ).fetchone()
+        return row["name"] if row else None
 
     # ------------------------------------------------------------------
     # Session management
@@ -221,11 +268,13 @@ class SessionDB:
     # ------------------------------------------------------------------
 
     def get_latest_summary(self, user_id: int) -> Optional[str]:
-        """Return the most recent non-null summary for a user."""
+        """Return the most recent non-null, non-stub summary for a user."""
         assert self._conn is not None
         row = self._conn.execute(
             "SELECT summary FROM sessions "
             "WHERE user_id = ? AND summary IS NOT NULL "
+            "  AND summary != 'Profile switched' "
+            "  AND length(trim(summary)) > 0 "
             "ORDER BY id DESC LIMIT 1",
             (user_id,),
         ).fetchone()
@@ -270,7 +319,7 @@ class SessionDB:
     def build_recap_for_user(self, user_id: int) -> Optional[str]:
         """Build a recap string suitable for prompt injection.
 
-        Returns None if no previous data exists.
+        Returns None if no previous meaningful data exists.
         """
         summary = self.get_latest_summary(user_id)
         session_count = self.get_user_session_count(user_id)
@@ -283,30 +332,40 @@ class SessionDB:
         if summary:
             parts.append(
                 f"خلاصه جلسه قبلی:\n{summary}\n\n"
-                "بر اساس این خلاصه، اگر کاربر در موضوعی ضعف داشته، "
-                "همان موضوع را دوباره تمرین کن. اگر خوب بوده، به موضوع بعدی برو."
+                "بر اساس این خلاصه:\n"
+                "- اگر فیلد «تکرار» عبارتی دارد، آن را در ابتدای جلسه مرور کن.\n"
+                "- اگر فیلد «ادامه» موضوعی دارد، بعد از مرور ادامه بده.\n"
+                "- اگر «نتیجه» مردود بود، همان واحد را دوباره از ابتدا شروع کن."
             )
         return "\n".join(parts)
 
     def get_recent_session_recap(
         self,
         current_session_id: int | None = None,
-        max_past: int = 3,
+        max_past: int = 2,
+        user_id: int | None = None,
     ) -> Optional[str]:
-        """Return a combined recap of the last N completed sessions that have real summaries.
+        """Return a combined recap of the last N completed sessions for a specific user.
 
-        Skips 'Profile switched' stubs and the currently-open session.
-        Returns None when no meaningful summaries exist yet so callers can
-        fall back to "first session" language.
+        Filters by user_id when provided so users never see each other's summaries.
+        Skips stub summaries and the currently-open session.
         """
         assert self._conn is not None
+        _STUB_SUMMARIES = frozenset([
+            "Profile switched",
+            "جلسه بسیار کوتاه بود — موضوع خاصی تمرین نشد.",
+        ])
         conditions = [
             "summary IS NOT NULL",
-            "length(trim(summary)) > 0",
-            "summary != 'Profile switched'",
-            "summary != 'جلسه بسیار کوتاه بود — موضوع خاصی تمرین نشد.'",
+            "length(trim(summary)) > 20",
         ]
         params: list = []
+
+        # Filter by user when we know who this is
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+
         if current_session_id is not None:
             conditions.append("id != ?")
             params.append(current_session_id)
@@ -318,15 +377,21 @@ class SessionDB:
             params,
         ).fetchall()
 
-        if not rows:
+        # Filter out stub summaries in Python (avoids complex SQL LIKE chains)
+        real_summaries = [
+            r["summary"] for r in reversed(rows)
+            if r["summary"] not in _STUB_SUMMARIES
+            and not r["summary"].startswith("جلسه بسیار کوتاه")
+        ]
+
+        if not real_summaries:
             return None
 
-        # Reverse to show oldest first (chronological reading order for the model)
-        summaries = [r["summary"] for r in reversed(rows)]
-        if len(summaries) == 1:
-            return f"خلاصه جلسه قبلی:\n{summaries[0]}"
-        parts = [f"جلسه {i + 1}:\n{s}" for i, s in enumerate(summaries)]
-        return "خلاصه جلسات اخیر:\n\n" + "\n\n".join(parts)
+        if len(real_summaries) == 1:
+            return f"خلاصه جلسه قبلی:\n{real_summaries[0]}"
+
+        parts = [f"جلسه {i + 1} (اخیر):\n{s}" for i, s in enumerate(real_summaries)]
+        return "خلاصه جلسات اخیر (از قدیم به جدید):\n\n" + "\n\n---\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Daily plan — curriculum scheduling
