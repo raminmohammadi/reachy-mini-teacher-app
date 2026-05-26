@@ -95,16 +95,6 @@ class Config:
         else []
     )
 
-    # ── Wake / Sleep word ─────────────────────────────────────────────────
-    # Phrase that wakes the robot from sleep mode (local STT, faster-whisper tiny).
-    WAKE_WORD: str = os.getenv("WAKE_WORD", "hi zizi")
-    # Phrase that sends the robot to sleep (detected in Gemini transcript).
-    SLEEP_WORD: str = os.getenv("SLEEP_WORD", "goodbye zizi")
-    # Seconds of user inactivity before automatic sleep (0 = disabled).
-    SLEEP_TIMEOUT_SECONDS: int = int(os.getenv("SLEEP_TIMEOUT_SECONDS", "300"))
-    # Start the app in sleep mode; robot wakes only when WAKE_WORD is heard.
-    START_ASLEEP: bool = _env_flag("START_ASLEEP", default=True)
-
     # ── Profiles / tools ─────────────────────────────────────────────────
     _profiles_directory_env = os.getenv("REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY")
     PROFILES_DIRECTORY: Path = (

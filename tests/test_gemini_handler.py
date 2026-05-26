@@ -63,6 +63,19 @@ class TestGeminiLiveHandlerConstruction:
         for method in ["receive", "emit", "shutdown", "start_up", "_send_loop", "_recv_loop"]:
             assert hasattr(handler, method) and callable(getattr(handler, method))
 
+    def test_wake_sleep_methods_removed(self):
+        # The voice wake/sleep state machine was removed; the desktop
+        # launcher/stop scripts drive the robot's wake/sleep transitions.
+        # These methods must not be re-introduced.
+        handler = GeminiLiveHandler(_make_deps())
+        for removed in (
+            "_wake_up", "_go_to_sleep", "_delayed_sleep", "_set_initial_pose",
+            "_sleep_timeout_watcher", "_check_wake_word", "_run_wake_word_detection",
+        ):
+            assert not hasattr(handler, removed), f"Removed method is back: {removed}"
+        for removed_attr in ("_is_sleeping", "_wake_word_model"):
+            assert not hasattr(handler, removed_attr), f"Removed attr is back: {removed_attr}"
+
     @pytest.mark.asyncio
     async def test_receive_queues_frame(self):
         handler = GeminiLiveHandler(_make_deps())
@@ -76,6 +89,85 @@ class TestGeminiLiveHandlerConstruction:
         assert not handler._shutdown_requested
         await handler.shutdown()
         assert handler._shutdown_requested
+
+
+# ── Transcript buffering ────────────────────────────────────────────────
+
+
+class TestTranscriptBuffering:
+    """Gemini Live streams transcripts in tiny fragments (often one word).
+    The handler must buffer them and only persist one merged DB message
+    per turn — otherwise the dashboard transcript floods with dozens of
+    one-word bubbles."""
+
+    def _make_handler(self):
+        handler = GeminiLiveHandler(_make_deps())
+        handler._session_id = 42  # pretend a DB session is active
+        handler._db = MagicMock()
+        return handler
+
+    def test_buffers_initialised_empty(self):
+        handler = GeminiLiveHandler(_make_deps())
+        assert handler._user_transcript_buffer == []
+        assert handler._assistant_transcript_buffer == []
+
+    def test_flush_combines_assistant_fragments(self):
+        handler = self._make_handler()
+        for chunk in ("Hello ", "Khosro ", "jan", "!"):
+            handler._assistant_transcript_buffer.append(chunk)
+        handler._flush_transcript_buffers()
+        handler._db.add_message.assert_called_once_with(42, "assistant", "Hello Khosro jan!")
+        assert handler._assistant_transcript_buffer == []
+
+    def test_flush_combines_user_fragments(self):
+        handler = self._make_handler()
+        for chunk in ("Qual ", "é o ", "nome", "?"):
+            handler._user_transcript_buffer.append(chunk)
+        handler._flush_transcript_buffers()
+        handler._db.add_message.assert_called_once_with(42, "user", "Qual é o nome?")
+
+    def test_flush_writes_both_roles_when_present(self):
+        handler = self._make_handler()
+        handler._user_transcript_buffer.extend(["hi"])
+        handler._assistant_transcript_buffer.extend(["hello ", "back"])
+        handler._flush_transcript_buffers()
+        # Order: user first, then assistant
+        calls = handler._db.add_message.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args == (42, "user", "hi")
+        assert calls[1].args == (42, "assistant", "hello back")
+
+    def test_flush_with_empty_buffers_does_nothing(self):
+        handler = self._make_handler()
+        handler._flush_transcript_buffers()
+        handler._db.add_message.assert_not_called()
+
+    def test_flush_skips_whitespace_only_chunks(self):
+        handler = self._make_handler()
+        handler._assistant_transcript_buffer.extend(["  ", "\n", " "])
+        handler._flush_transcript_buffers()
+        handler._db.add_message.assert_not_called()
+        assert handler._assistant_transcript_buffer == []
+
+    def test_flush_without_session_id_clears_buffers(self):
+        handler = GeminiLiveHandler(_make_deps())
+        handler._session_id = None
+        handler._db = MagicMock()
+        handler._assistant_transcript_buffer.append("orphan text")
+        handler._flush_transcript_buffers()
+        handler._db.add_message.assert_not_called()
+        assert handler._assistant_transcript_buffer == []
+
+    @pytest.mark.asyncio
+    async def test_shutdown_flushes_pending_buffers(self):
+        handler = self._make_handler()
+        handler._assistant_transcript_buffer.append("final partial turn")
+        # _generate_session_summary touches the network — stub it out.
+        handler._generate_session_summary = AsyncMock(return_value=None)
+        await handler.shutdown()
+        # The pending fragment must hit the DB before end_session is called
+        # so the summary generator sees the full conversation.
+        handler._db.add_message.assert_any_call(42, "assistant", "final partial turn")
 
 
 # ── Tool spec conversion ────────────────────────────────────────────────

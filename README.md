@@ -44,17 +44,21 @@ When launched, a **FastAPI web UI** is served at `http://localhost:7860` with:
 - **Default** — General-purpose Farsi-speaking AI companion with real-time conversation, head tracking, emotions, and weather lookup.
 - **English Teacher** — Structured 7-unit curriculum for elderly Persian speakers learning English. See [English Teacher](#-english-teacher-profile) section below.
 
+### 👁️ Continuous Face Tracking
+The robot follows the user's face automatically, all the time — no tool call needed. A background camera worker grabs frames from the Reachy Mini camera at 25 Hz and runs a YOLOv11n face detector at ~7 Hz; the detected face center is fed into the 100 Hz movement loop as a damped (0.6×) secondary offset on top of whatever primary move is playing. When no face is visible for 2 s the head smoothly glides back to neutral over 1 s.
+
+Requires the `yolo_vision` extra (see [Installation](#installation)). On systems with a broken NVIDIA driver the app sets `CUDA_VISIBLE_DEVICES=""` so torch falls back to CPU cleanly — CPU is fast enough for the 7 Hz inference rate.
+
 ### 🛠️ Built-in Tools
 | Tool | Description |
 |------|-------------|
-| `head_tracking` | Follows the user's face with the camera |
-| `play_emotion` | Plays expressive robot animations |
-| `dance` | Executes choreographed movement sequences |
+| `play_emotion` / `stop_emotion` | Plays / interrupts expressive robot animations |
+| `dance` / `stop_dance` | Executes / interrupts choreographed movement sequences |
 | `move_head` | Points the head in a specific direction |
 | `check_weather` | Fetches real weather via Open-Meteo (no API key needed) |
 | `camera` | Captures a snapshot and describes what it sees |
 | `switch_persona` | Switches between available profiles mid-conversation |
-| `remember_user_name` | Persists the user's name across sessions |
+| `remember_user_name` / `switch_user` | Persists / switches the active user across sessions |
 | `set_user_level` | Saves the student's assessed English level (1–3) |
 | `do_nothing` | Explicit wait — stops the AI from filling silence |
 
@@ -128,9 +132,19 @@ Honest feedback rule: **never say "آفرین" when pronunciation is wrong**. Th
 - A `GEMINI_API_KEY` (for Gemini Live mode)
 
 ### Installation
+For developers (editable install from a checkout):
 ```bash
-pip install reachy_mini_teacher_app
+git clone <repo-url> reachy-mini-teacher-app
+cd reachy-mini-teacher-app
+python3 -m venv venv && source venv/bin/activate
+pip install -e '.[yolo_vision]'
 ```
+
+The `[yolo_vision]` extra pulls in `ultralytics`, `supervision`, and `torch` (CPU build) so continuous face tracking works out of the box. Without it the app still runs, but the camera worker logs a warning and the head stays still.
+
+Other optional extras:
+- `[local_vision]` — local SmolVLM2 vision model for the `camera` tool (no Gemini round-trip).
+- `[mediapipe_vision]` — alternative head tracker via MediaPipe (face mesh).
 
 ### Configuration
 Copy `.env.example` to `.env` and fill in your API key:
@@ -146,7 +160,22 @@ REACHY_MINI_CUSTOM_PROFILE=english_teacher  # omit for default profile
 reachy-mini-teacher-app
 ```
 
-The web dashboard starts at **http://localhost:7860** automatically.
+The web dashboard starts at **http://localhost:7860** automatically. CLI flags:
+- `--no-camera` — disable the camera worker entirely (no face tracking, no `camera` tool)
+- `--head-tracker {yolo,mediapipe,None}` — choose tracker backend (default: `yolo`)
+- `--local-vision` — use local SmolVLM2 instead of Gemini for the `camera` tool
+- `--mode {gemini,openai,local}` — pick the AI backend (overrides `APP_MODE`)
+
+### Desktop Launcher (Linux / GNOME)
+For non-technical end users, install one-click desktop icons that handle daemon cycling, browser open, and live log streaming:
+```bash
+./scripts/install_launcher.sh
+```
+This installs two `.desktop` entries:
+- **Reachy Teacher** — wakes the robot, starts the app, opens the dashboard.
+- **Stop Reachy Teacher** — gracefully stops the app and puts the robot to sleep.
+
+The launcher waits up to 60 s for the FastAPI dashboard to come up (torch + YOLO load is ~11 s on CPU), then opens the browser. Logs are written to `~/.local/share/reachy-mini-teacher-app/{app,launcher}.log`.
 
 ### Publish to HuggingFace Spaces
 ```bash
@@ -160,10 +189,15 @@ reachy-mini-app-assistant publish
 ## 📁 Project Structure
 
 ```
-reachy_mini_teacher_app/          ← project root (HF flat layout)
+reachy-mini-teacher-app/          ← repo root
 ├── sessions.db                 # SQLite session database (git-ignored)
 ├── pyproject.toml
 ├── README.md
+├── scripts/                    # Desktop launcher + install helpers
+│   ├── install_launcher.sh
+│   ├── launch_teacher_app.sh   # Foreground launcher with daemon cycling
+│   ├── stop_teacher_app.sh
+│   └── reachy-mini-teacher-app{,-stop}.desktop
 └── reachy_mini_teacher_app/      ← Python package
     ├── main.py                 # Entry point, ReachyMiniTeacherApp, FastAPI server
     ├── gemini_handler.py       # Gemini Live handler (native audio, VAD, multi-turn)
@@ -171,16 +205,19 @@ reachy_mini_teacher_app/          ← project root (HF flat layout)
     ├── openai_handler.py       # OpenAI Realtime handler
     ├── config.py               # Environment variable config (pydantic-settings)
     ├── moves.py                # 100 Hz robot movement control loop
+    ├── camera_worker.py        # 25 Hz frame buffer + 7 Hz face inference thread
     ├── session_db.py           # SQLite session storage, curriculum, recap
     ├── session_summarizer.py   # Structured AI-generated session summaries
     ├── prompts.py              # Prompt loading and placeholder injection
     ├── static/                 # Web dashboard (served at localhost:7860)
+    ├── vision/
+    │   └── yolo_head_tracker.py  # YOLOv11n face detector (default tracker)
     ├── profiles/
     │   ├── default/            # Default Farsi assistant profile
     │   └── english_teacher/    # English teaching profile + instructions
     └── tools/
+        ├── camera.py
         ├── check_weather.py
-        ├── head_tracking.py
         ├── play_emotion.py
         ├── remember_user_name.py
         ├── set_user_level.py

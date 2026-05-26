@@ -99,7 +99,14 @@
 """
 from __future__ import annotations
 import logging
+import os
 from typing import Tuple
+
+# Belt-and-suspenders: if no working NVIDIA driver is available, hide any
+# physical GPU from torch/ultralytics before they probe the kernel module.
+# A broken driver can otherwise abort the whole process at import time with
+# no Python traceback.  Honour an explicit user setting if one is present.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import numpy as np
 from numpy.typing import NDArray

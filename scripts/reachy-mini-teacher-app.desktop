@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Reachy Teacher
+GenericName=Reachy Mini Teacher App
+Comment=Start the Reachy Mini Teacher app and open its dashboard
+Exec=/home/ramin/Downloads/reachy-mini-teacher-app/scripts/launch_teacher_app.sh
+Icon=reachy-mini-control
+Terminal=false
+Categories=Education;Science;
+StartupNotify=true
+StartupWMClass=reachy-mini-teacher-app
