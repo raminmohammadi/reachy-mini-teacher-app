@@ -68,6 +68,15 @@ class TestConfigClass:
         c = Config()
         assert isinstance(c.PROFILES_DIRECTORY, Path)
 
+    def test_wake_sleep_fields_removed(self):
+        # The wake/sleep voice-trigger feature was removed; the desktop
+        # launcher/stop scripts now drive start + sleep.  These attributes
+        # must not be re-introduced (lest stale env vars silently no-op).
+        from reachy_mini_teacher_app.config import Config
+        c = Config()
+        for removed in ("WAKE_WORD", "SLEEP_WORD", "SLEEP_TIMEOUT_SECONDS", "START_ASLEEP"):
+            assert not hasattr(c, removed), f"Removed field is back: {removed}"
+
 
 # ── set_custom_profile ───────────────────────────────────────────────────
 

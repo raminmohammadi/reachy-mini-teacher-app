@@ -2,9 +2,15 @@
 
 const API = "";          // same origin
 const POLL_MS = 2000;    // refresh interval
+// Number of consecutive failed status polls before we declare the app stopped
+// (avoids flashing "Stopped" during a brief network blip / page refresh).
+const OFFLINE_THRESHOLD = 3;
 
 let knownMsgIds = new Set();
 let clearViewFlag = false;
+let offlineCount = 0;
+let stoppedShown = false;
+let sawOnline = false;   // only treat offline as "stopped" if we were online first
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 function fmtTime(ts) {
@@ -35,6 +41,8 @@ function applyStatus(data) {
   document.getElementById("val-msgs").textContent    = data.message_count ?? "—";
   document.getElementById("val-start").textContent   = fmtTime(data.start_time) || "—";
   setStatus("🟢 Online", "online");
+  offlineCount = 0;
+  sawOnline = true;
 
   // Profile buttons
   const profiles = data.profiles || ["default"];
@@ -117,6 +125,36 @@ function clearView() {
 // ── Main poll loop ────────────────────────────────────────────────────────────
 let lastSessionId = null;
 
+function showStoppedOverlay() {
+  if (stoppedShown) return;
+  stoppedShown = true;
+  // Try to close the tab.  Browsers only allow window.close() on tabs that
+  // were opened by script, so for tabs opened via xdg-open this is usually
+  // a no-op — we still show a friendly overlay so the user knows.
+  try { window.close(); } catch (_) { /* ignored */ }
+
+  const overlay = document.createElement("div");
+  overlay.id = "stopped-overlay";
+  overlay.style.cssText =
+    "position:fixed;inset:0;background:rgba(20,20,28,0.92);color:#fff;" +
+    "display:flex;flex-direction:column;align-items:center;justify-content:center;" +
+    "font-family:system-ui,sans-serif;text-align:center;padding:2rem;z-index:9999;";
+  overlay.innerHTML = `
+    <div style="font-size:5rem;line-height:1;">😴</div>
+    <h1 style="margin:1rem 0 0.5rem;font-size:2rem;">Reachy Teacher Stopped</h1>
+    <p style="margin:0 0 1.5rem;font-size:1.1rem;opacity:0.85;">
+      The session has been saved. You can close this tab.
+    </p>
+    <button id="close-tab-btn" style="
+      padding:0.75rem 1.5rem;font-size:1rem;border:0;border-radius:0.5rem;
+      background:#4f8cff;color:#fff;cursor:pointer;">
+      Close this tab
+    </button>`;
+  document.body.appendChild(overlay);
+  const btn = document.getElementById("close-tab-btn");
+  if (btn) btn.onclick = () => { try { window.close(); } catch (_) {} };
+}
+
 async function poll() {
   try {
     const status = await fetchStatus();
@@ -131,7 +169,13 @@ async function poll() {
       renderMessages(messages);
     }
   } catch (e) {
-    setStatus("🔴 Offline", "error");
+    offlineCount += 1;
+    if (sawOnline && offlineCount >= OFFLINE_THRESHOLD) {
+      setStatus("🔴 Stopped", "error");
+      showStoppedOverlay();
+    } else {
+      setStatus("🔴 Offline", "error");
+    }
   }
 }
 

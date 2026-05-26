@@ -76,6 +76,16 @@ class CameraWorker:
         # Track state changes
         self.previous_head_tracking_state = self.is_head_tracking_enabled
 
+        # YOLO inference is CPU-heavy (~30-50 ms per frame on a modern laptop
+        # CPU).  Running it every iteration of the 25 Hz frame poll starves
+        # the audio capture / Gemini Live send threads, causing the speech
+        # recogniser to miss whole utterances.  Decouple the two cadences:
+        # frames are still buffered at 25 Hz so the `camera` tool gets a
+        # fresh image, but face detection runs at most every 150 ms (≈7 Hz)
+        # — ample for tracking a human head and ~3× less CPU.
+        self.face_inference_period_sec = 0.15
+        self._last_face_inference_time: float = 0.0
+
     def get_latest_frame(self) -> NDArray[np.uint8] | None:
         """Get the latest frame (thread-safe)."""
         with self.frame_lock:
@@ -145,8 +155,15 @@ class CameraWorker:
                     # Update tracking state
                     self.previous_head_tracking_state = self.is_head_tracking_enabled
 
-                    # Handle face tracking if enabled and head tracker available
-                    if self.is_head_tracking_enabled and self.head_tracker is not None:
+                    # Handle face tracking if enabled and head tracker available.
+                    # Throttle the expensive YOLO call to ~7 Hz so audio threads
+                    # keep their CPU budget; frame buffering above is unaffected.
+                    if (
+                        self.is_head_tracking_enabled
+                        and self.head_tracker is not None
+                        and (current_time - self._last_face_inference_time) >= self.face_inference_period_sec
+                    ):
+                        self._last_face_inference_time = current_time
                         eye_center, _ = self.head_tracker.get_head_position(frame)
 
                         if eye_center is not None:

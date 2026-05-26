@@ -37,8 +37,8 @@ def parse_args() -> Tuple[argparse.Namespace, list]:  # type: ignore
     parser.add_argument(
         "--head-tracker",
         choices=["yolo", "mediapipe", None],
-        default=None,
-        help="Choose head tracker (default: None)",
+        default="yolo",
+        help="Choose head tracker (default: yolo). Pass --head-tracker None to disable.",
     )
     parser.add_argument("--no-camera", default=False, action="store_true", help="Disable camera usage")
     parser.add_argument(
@@ -60,20 +60,37 @@ def parse_args() -> Tuple[argparse.Namespace, list]:  # type: ignore
 
 def handle_vision_stuff(args: argparse.Namespace, current_robot: ReachyMini) -> Tuple[CameraWorker | None, Any, Any]:
     """Initialize camera worker, head tracker, and optionally local vision manager."""
+    log = logging.getLogger(__name__)
     camera_worker = None
     head_tracker = None
     vision_manager = None
 
     if not args.no_camera:
         if args.head_tracker is not None:
-            if args.head_tracker == "yolo":
-                from reachy_mini_teacher_app.vision.yolo_head_tracker import HeadTracker
-                head_tracker = HeadTracker()
-            elif args.head_tracker == "mediapipe":
-                from reachy_mini_toolbox.vision import HeadTracker  # type: ignore[no-redef]
-                head_tracker = HeadTracker()
+            try:
+                if args.head_tracker == "yolo":
+                    log.info("handle_vision_stuff: importing yolo_head_tracker …")
+                    from reachy_mini_teacher_app.vision.yolo_head_tracker import HeadTracker
+                    log.info("handle_vision_stuff: yolo_head_tracker imported; constructing HeadTracker …")
+                    head_tracker = HeadTracker()
+                    log.info("handle_vision_stuff: HeadTracker constructed")
+                elif args.head_tracker == "mediapipe":
+                    log.info("handle_vision_stuff: importing mediapipe HeadTracker …")
+                    from reachy_mini_toolbox.vision import HeadTracker  # type: ignore[no-redef]
+                    head_tracker = HeadTracker()
+                    log.info("handle_vision_stuff: mediapipe HeadTracker constructed")
+            except ImportError as e:
+                log.warning(
+                    "Head tracker '%s' unavailable (%s); continuing without continuous face tracking. "
+                    "Install with: pip install '.[yolo_vision]'",
+                    args.head_tracker, e,
+                )
+                head_tracker = None
 
+        log.info("handle_vision_stuff: constructing CameraWorker (head_tracker=%s) …",
+                 type(head_tracker).__name__ if head_tracker else None)
         camera_worker = CameraWorker(current_robot, head_tracker)
+        log.info("handle_vision_stuff: CameraWorker constructed")
 
         if args.local_vision:
             try:

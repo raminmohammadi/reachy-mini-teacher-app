@@ -49,6 +49,11 @@ local_vision = [
   "num2words",
 ]
 yolo_vision = [
+  # Continuous face tracking via YOLOv11n-face-detection.
+  # `torch` is pulled in transitively by ultralytics but pinning it here
+  # documents the intent and lets `pip install --dry-run` show the full
+  # ML stack up front.
+  "torch>=2.0",
   "ultralytics",
   "supervision",
 ]

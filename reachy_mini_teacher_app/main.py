@@ -18,11 +18,30 @@ reachy-mini-local-app --mode gemini --gradio
 from __future__ import annotations
 
 import datetime
+import os
 import signal
 import sys
 import logging
 import threading
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Eager-import the heavy ML stack (torch / ultralytics / cv2) BEFORE any
+# reachy_mini SDK import.  The SDK spins up GStreamer/GLib threads as soon as
+# it is loaded, and importing torch after GStreamer threads are already
+# running causes a silent C-level abort on systems where the two libraries
+# disagree about libgomp / glib versions.  Pre-loading puts torch's runtime
+# in place first so GStreamer threads inherit the right global state.
+#
+# Also force CUDA enumeration to be empty: the discrete NVIDIA driver on
+# this machine is broken, and probing it can crash torch at import time.
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+try:
+    from reachy_mini_teacher_app.vision import yolo_head_tracker as _preload_yolo  # noqa: F401
+except ImportError:
+    # yolo_vision extra not installed — head tracking will be disabled later
+    # in handle_vision_stuff(); not a fatal condition at import time.
+    pass
 
 # reachy_mini is only available on the physical robot.
 # Both imports are guarded so the module (and therefore the package) can be
@@ -123,20 +142,57 @@ def _run(
     the event fires, so ``run()`` returns cleanly.
     """
 
-    # --- Movement Manager ---
-    movement_manager = MovementManager(robot)
-    movement_manager.start()
-
     # --- Vision / Camera ---
-    camera_worker, _head_tracker, vision_manager = handle_vision_stuff(args or _dummy_args(), robot)
+    # Must be built before MovementManager: the 100 Hz movement loop polls
+    # camera_worker.get_face_tracking_offsets() each tick and falls back to
+    # neutral (0,0,0,0,0,0) if no camera_worker reference is held, which
+    # silently disables head tracking.
+    effective_args = args or _dummy_args()
+    logger.info(
+        "_run: initialising vision (no_camera=%s, head_tracker=%s, local_vision=%s) …",
+        getattr(effective_args, "no_camera", None),
+        getattr(effective_args, "head_tracker", None),
+        getattr(effective_args, "local_vision", None),
+    )
+    try:
+        camera_worker, _head_tracker, vision_manager = handle_vision_stuff(effective_args, robot)
+    except Exception:
+        logger.exception("_run: handle_vision_stuff failed")
+        raise
+    logger.info(
+        "_run: vision constructed (camera_worker=%s, head_tracker=%s, vision_manager=%s)",
+        type(camera_worker).__name__ if camera_worker else None,
+        type(_head_tracker).__name__ if _head_tracker else None,
+        type(vision_manager).__name__ if vision_manager else None,
+    )
+
+    # --- Movement Manager (receives camera_worker so face tracking offsets
+    # flow into the 100 Hz control loop) ---
+    logger.info("_run: initialising MovementManager (camera_worker=%s) …",
+                type(camera_worker).__name__ if camera_worker else None)
+    try:
+        movement_manager = MovementManager(robot, camera_worker=camera_worker)
+        movement_manager.start()
+    except Exception:
+        logger.exception("_run: MovementManager init failed")
+        raise
+    logger.info("_run: MovementManager ready")
+
     if camera_worker is not None:
-        camera_worker.start()
+        try:
+            camera_worker.start()
+        except Exception:
+            logger.exception("_run: camera_worker.start() failed")
+            raise
+        logger.info("_run: camera worker started")
 
     # --- Head Wobbler ---
     def _set_speech_offsets(offsets):
         movement_manager.set_speech_offsets(offsets)
 
+    logger.info("_run: initialising HeadWobbler …")
     head_wobbler = HeadWobbler(set_speech_offsets=_set_speech_offsets)
+    logger.info("_run: HeadWobbler ready")
 
     # --- Tool Dependencies ---
     deps = ToolDependencies(
@@ -208,7 +264,10 @@ class _dummy_args:
     """Minimal args object when running from the plugin system (no CLI)."""
     no_camera = False
     local_vision = False
-    head_tracker = None
+    # Default to the YOLO face tracker so the desktop launcher gets continuous
+    # head tracking without requiring CLI flags.  handle_vision_stuff() falls
+    # back to no tracker if the optional yolo_vision extra is not installed.
+    head_tracker = "yolo"
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +405,12 @@ def main() -> None:
         log_connection_troubleshooting(logger, robot_name)
         sys.exit(1)
 
+    gradio_mode = getattr(args, "gradio", False)
+    if not gradio_mode:
+        _start_web_ui()
+
     try:
-        _run(robot, gradio_mode=getattr(args, "gradio", False), args=args)
+        _run(robot, gradio_mode=gradio_mode, args=args)
     except KeyboardInterrupt:
         pass
     finally:

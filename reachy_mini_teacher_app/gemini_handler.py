@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-import time
 import threading
 import base64
 import asyncio
@@ -119,25 +117,30 @@ class GeminiLiveHandler(AsyncStreamHandler):
         self._known_user_name: Optional[str] = None
         self._known_user_id: Optional[int] = None
         self._known_user_level: int = 1  # 1=beginner, 2=intermediate, 3=advanced
-        # ── Wake / Sleep state ────────────────────────────────────────────────
-        # When sleeping: no audio is forwarded to Gemini; local STT checks for wake word.
-        self._is_sleeping: bool = config.START_ASLEEP
-        self._last_user_activity: float = time.monotonic()
-        # Energy-triggered wake word detection (faster-whisper tiny, lazy-loaded).
-        # Instead of fixed 2-second windows (which split short phrases), we use a
-        # simple VAD: capture audio when RMS > threshold, run whisper after end-of-speech.
-        self._wake_word_model: Any = None  # lazy-loaded
-        self._wake_word_model_lock = threading.Lock()  # prevents double-load race
-        _SR = GEMINI_INPUT_SAMPLE_RATE  # 16 000 Hz
-        self._WAKE_ENERGY_THRESHOLD: float = 250.0      # int16 RMS — tune up if false triggers
-        self._WAKE_PRE_ROLL_SAMPLES: int  = _SR // 2   # 0.5 s pre-roll before speech onset
-        self._WAKE_SILENCE_END_SAMPLES: int = _SR // 2 # 0.5 s silence → end of phrase
-        self._WAKE_MAX_SPEECH_SAMPLES: int  = _SR * 4  # 4 s cap to avoid runaway capture
-        self._wake_pre_buffer: List[np.ndarray] = []   # rolling pre-roll (trimmed to 0.5 s)
-        self._wake_pre_samples: int = 0
-        self._wake_speech_buffer: List[np.ndarray] = [] # frames captured during speech
-        self._wake_speech_samples: int = 0
-        self._wake_silence_samples: int = 0             # silence frames since last speech
+        # Gemini Live streams input/output transcripts in many small fragments
+        # (often one word at a time).  We buffer them per turn and persist one
+        # combined message to the DB on turn_complete / interrupt, so the
+        # dashboard transcript shows whole utterances instead of dozens of
+        # one-word bubbles.
+        self._user_transcript_buffer: List[str] = []
+        self._assistant_transcript_buffer: List[str] = []
+
+    def _flush_transcript_buffers(self) -> None:
+        """Persist any buffered transcription fragments as single DB rows."""
+        if self._session_id is None:
+            self._user_transcript_buffer.clear()
+            self._assistant_transcript_buffer.clear()
+            return
+        if self._user_transcript_buffer:
+            text = "".join(self._user_transcript_buffer).strip()
+            if text:
+                self._db.add_message(self._session_id, "user", text)
+            self._user_transcript_buffer.clear()
+        if self._assistant_transcript_buffer:
+            text = "".join(self._assistant_transcript_buffer).strip()
+            if text:
+                self._db.add_message(self._session_id, "assistant", text)
+            self._assistant_transcript_buffer.clear()
 
     def copy(self) -> "GeminiLiveHandler":
         return GeminiLiveHandler(self.deps, self.gradio_mode)
@@ -158,6 +161,9 @@ class GeminiLiveHandler(AsyncStreamHandler):
         """Graceful shutdown."""
         self._shutdown_requested = True
         await self.tool_manager.shutdown()
+        # Flush any in-flight transcript fragments so the session summary
+        # includes the final partial turn.
+        self._flush_transcript_buffers()
         # Generate summary, evaluate pass/fail, end session
         if self._session_id is not None:
             result = await self._generate_session_summary()
@@ -190,194 +196,6 @@ class GeminiLiveHandler(AsyncStreamHandler):
         except Exception as e:
             logger.error("Failed to generate session summary: %s", e)
             return None
-
-    # ------------------------------------------------------------------
-    # Wake / Sleep state machine
-    # ------------------------------------------------------------------
-
-    async def _wake_up(self) -> None:
-        """Transition from sleep → awake: move to wake pose and greet via Gemini."""
-        if not self._is_sleeping:
-            return
-        self._is_sleeping = False
-        self._last_user_activity = time.monotonic()
-        logger.info("Wake word detected — waking up")
-
-        # Move robot to neutral (awake) pose
-        mm = self.deps.movement_manager
-        if mm is not None:
-            try:
-                from reachy_mini_teacher_app.dance_emotion_moves import GotoQueueMove
-                from reachy_mini.utils import create_head_pose
-                # Cancel the sleep-hold move so the robot can move freely again
-                mm.clear_move_queue()
-                wake_head = create_head_pose(0, 0, 0, 0, 0, 0, degrees=True)
-                wake_move = GotoQueueMove(
-                    target_head_pose=wake_head,
-                    target_antennas=(-0.1745, 0.1745),
-                    target_body_yaw=0.0,
-                    duration=1.5,
-                )
-                mm.queue_move(wake_move)
-            except Exception as e:
-                logger.debug("Wake up pose error: %s", e)
-
-        # Kick off Gemini so it greets the user
-        if self._session is not None:
-            try:
-                await self._session.send_client_content(
-                    turns={"role": "user", "parts": [{"text": "سلام"}]},
-                    turn_complete=True,
-                )
-                logger.info("Sent wake-up kickoff to Gemini")
-            except Exception as e:
-                logger.debug("Wake up kickoff failed: %s", e)
-
-    async def _go_to_sleep(self) -> None:
-        """Transition from awake → sleep: move to sleep pose and stop sending audio."""
-        if self._is_sleeping:
-            return
-        self._is_sleeping = True
-        logger.info("Going to sleep — inactivity or sleep word")
-
-        # Clear pending wake-word audio so stale audio doesn't trigger on wake-up
-        self._wake_pre_buffer.clear()
-        self._wake_pre_samples = 0
-        self._wake_speech_buffer.clear()
-        self._wake_speech_samples = 0
-        self._wake_silence_samples = 0
-
-        # Move robot to sleep pose (head bowed, antennas low) then hold it.
-        # Without the hold move the MovementManager's BreathingMove kicks in after
-        # 0.3 s of inactivity and overrides the sleep pose with antenna sway.
-        mm = self.deps.movement_manager
-        if mm is not None:
-            try:
-                from reachy_mini_teacher_app.dance_emotion_moves import GotoQueueMove
-                from reachy_mini.utils import create_head_pose
-                # pitch=-40° → head droops clearly downward (visibly asleep)
-                sleep_head = create_head_pose(0, 0, 0, 0, -40, 0, degrees=True)
-                sleep_antennas = (-0.05, 0.05)  # antennas nearly flat / resting
-                # Step 1: transition to sleep pose over 2 seconds
-                sleep_move = GotoQueueMove(
-                    target_head_pose=sleep_head,
-                    target_antennas=sleep_antennas,
-                    target_body_yaw=0.0,
-                    duration=2.0,
-                )
-                mm.queue_move(sleep_move)
-                # Step 2: hold sleep pose for 1 hour — prevents BreathingMove
-                # from swaying antennas / bobbing head while robot is asleep.
-                sleep_hold = GotoQueueMove(
-                    target_head_pose=sleep_head,
-                    start_head_pose=sleep_head,
-                    target_antennas=sleep_antennas,
-                    start_antennas=sleep_antennas,
-                    target_body_yaw=0.0,
-                    start_body_yaw=0.0,
-                    duration=3600.0,
-                )
-                mm.queue_move(sleep_hold)
-            except Exception as e:
-                logger.debug("Sleep pose error: %s", e)
-
-    async def _delayed_sleep(self, delay: float = 4.0) -> None:
-        """Go to sleep after *delay* seconds (lets Gemini finish its goodbye)."""
-        await asyncio.sleep(delay)
-        await self._go_to_sleep()
-
-    async def _set_initial_pose(self) -> None:
-        """After a short delay (robot connects), move to the initial pose."""
-        await asyncio.sleep(3.0)
-        if self._is_sleeping:
-            await self._go_to_sleep()
-
-    async def _sleep_timeout_watcher(self) -> None:
-        """Background task: automatically sleep after SLEEP_TIMEOUT_SECONDS of silence."""
-        timeout = config.SLEEP_TIMEOUT_SECONDS
-        if timeout <= 0:
-            return  # disabled
-        while not self._shutdown_requested:
-            await asyncio.sleep(30)  # poll every 30 s
-            if self._shutdown_requested:
-                break
-            if not self._is_sleeping:
-                elapsed = time.monotonic() - self._last_user_activity
-                if elapsed >= timeout:
-                    logger.info(
-                        "Inactivity timeout (%.0fs >= %ds) — going to sleep",
-                        elapsed, timeout,
-                    )
-                    await self._go_to_sleep()
-
-    async def _check_wake_word(self, pcm_chunks: List[np.ndarray]) -> None:
-        """Transcribe *pcm_chunks* with faster-whisper and wake up if wake word heard."""
-        if not self._is_sleeping:
-            return  # already awake
-        try:
-            audio_int16 = np.concatenate(pcm_chunks)
-            audio_float32 = audio_int16.astype(np.float32) / 32768.0
-            detected = await asyncio.to_thread(self._run_wake_word_detection, audio_float32)
-            if detected:
-                await self._wake_up()
-        except Exception as e:
-            logger.debug("Wake word check error: %s", e)
-
-    def _run_wake_word_detection(self, audio_float32: np.ndarray) -> bool:
-        """Run faster-whisper (tiny) on *audio_float32* and return True if wake word found.
-
-        This runs in a thread pool so it does not block the event loop.
-        The 'tiny' model transcribes 2 s of audio in ~300–600 ms on CPU.
-        """
-        try:
-            with self._wake_word_model_lock:
-                if self._wake_word_model is None:
-                    from faster_whisper import WhisperModel
-                    self._wake_word_model = WhisperModel(
-                        "tiny", device="cpu", compute_type="int8"
-                    )
-                    logger.info("Wake word detector: faster-whisper tiny model loaded")
-
-            segments, _ = self._wake_word_model.transcribe(
-                audio_float32,
-                language=None,    # auto-detect (handles Farsi "زیزی" etc.)
-                beam_size=1,      # fastest decode
-                vad_filter=False, # disabled — we already gate on energy in _send_loop
-            )
-            transcript = " ".join(seg.text for seg in segments).lower().strip()
-            if transcript:
-                logger.info("Wake word detector heard: %r", transcript)
-            else:
-                logger.debug("Wake word detector: no transcript from speech segment")
-
-            wake_word = config.WAKE_WORD.lower()
-            # Phonetic variants of the robot name — faster-whisper tiny often
-            # transcribes "Zizi" as "Sisi", "Cici", "Jiji", "izzy", "zz", etc.
-            _ROBOT_NAME_VARIANTS = {
-                "zizi", "sisi", "jiji", "sizi", "zisi", "cici", "gigi",
-                "zi zi", "si si", "cc", "cece", "cee cee", "zeezee",
-                # newly observed from logs:
-                "izzy", "zz", "exisi", "xizi", "izi", "isis", "eazy", "eezi",
-                "easy", "xisi", "zee zee", "zy", "zizi's", "sisi's",
-            }
-            _GREETINGS = {"hi", "hey", "hello", "hei", "hé", "hai"}
-            # Check 1: exact match or wake_word substring in transcript
-            if wake_word in transcript:
-                return True
-            # Check 2: a greeting word + any robot name variant both appear
-            transcript_words = set(transcript.split())
-            has_greeting = bool(transcript_words & _GREETINGS)
-            has_name = bool(transcript_words & _ROBOT_NAME_VARIANTS)
-            # Also check multi-token variants like "zi zi" or "si si"
-            if not has_name:
-                has_name = any(v in transcript for v in _ROBOT_NAME_VARIANTS)
-            # Check 3: greeting + possessive/apostrophe variant e.g. "it's izzy"
-            if not has_name and has_greeting:
-                has_name = any(v in transcript for v in ("izzy", "zz", "exisi", "izi", "isis"))
-            return has_greeting and has_name
-        except Exception as e:
-            logger.debug("Wake word detection error: %s", e)
-            return False
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -551,18 +369,7 @@ class GeminiLiveHandler(AsyncStreamHandler):
         # Start tool manager with callback to send results back to Gemini
         self.tool_manager.start_up(tool_callbacks=[self._on_tool_complete])
 
-        # Background tasks: sleep timeout watcher + initial robot pose
-        watcher_task = asyncio.create_task(
-            self._sleep_timeout_watcher(), name="sleep-timeout-watcher"
-        )
-        asyncio.create_task(self._set_initial_pose(), name="initial-pose")
-
-        if self._is_sleeping:
-            logger.info(
-                "Starting in SLEEP mode — say %r to wake up", config.WAKE_WORD
-            )
-        else:
-            logger.info("Starting in AWAKE mode")
+        logger.info("Starting Gemini Live handler — ready to talk")
 
         reconnect_delay = 2.0  # seconds between reconnect attempts
         while not self._shutdown_requested:
@@ -660,12 +467,6 @@ class GeminiLiveHandler(AsyncStreamHandler):
             logger.info("Reconnecting to Gemini Live in %.1fs …", delay)
             await asyncio.sleep(delay)
 
-        watcher_task.cancel()
-        try:
-            await watcher_task
-        except asyncio.CancelledError:
-            pass
-
         self._session = None
         if head_wobbler is not None:
             head_wobbler.stop()
@@ -711,53 +512,6 @@ class GeminiLiveHandler(AsyncStreamHandler):
 
             pcm_int16 = audio_to_int16(audio_frame)
 
-            # ── Sleep mode: energy-triggered VAD for wake-word detection ────────
-            if self._is_sleeping:
-                n = len(pcm_int16)
-                rms = float(np.sqrt(np.mean(pcm_int16.astype(np.float32) ** 2)))
-                is_speech = rms > self._WAKE_ENERGY_THRESHOLD
-
-                if self._wake_speech_samples == 0:
-                    # Not yet in a speech segment — maintain rolling pre-roll buffer
-                    self._wake_pre_buffer.append(pcm_int16)
-                    self._wake_pre_samples += n
-                    # Trim pre-roll to the last 0.5 s
-                    while self._wake_pre_samples > self._WAKE_PRE_ROLL_SAMPLES and self._wake_pre_buffer:
-                        dropped = self._wake_pre_buffer.pop(0)
-                        self._wake_pre_samples -= len(dropped)
-
-                    if is_speech:
-                        # Speech onset — move pre-roll into speech buffer
-                        self._wake_speech_buffer = list(self._wake_pre_buffer)
-                        self._wake_speech_samples = self._wake_pre_samples
-                        self._wake_pre_buffer.clear()
-                        self._wake_pre_samples = 0
-                        self._wake_silence_samples = 0
-                else:
-                    # Inside a speech segment
-                    self._wake_speech_buffer.append(pcm_int16)
-                    self._wake_speech_samples += n
-
-                    if is_speech:
-                        self._wake_silence_samples = 0
-                    else:
-                        self._wake_silence_samples += n
-
-                    end_of_phrase = self._wake_silence_samples >= self._WAKE_SILENCE_END_SAMPLES
-                    too_long = self._wake_speech_samples >= self._WAKE_MAX_SPEECH_SAMPLES
-
-                    if end_of_phrase or too_long:
-                        buf_snapshot = list(self._wake_speech_buffer)
-                        self._wake_speech_buffer.clear()
-                        self._wake_speech_samples = 0
-                        self._wake_silence_samples = 0
-                        self._wake_pre_buffer.clear()
-                        self._wake_pre_samples = 0
-                        asyncio.create_task(self._check_wake_word(buf_snapshot))
-
-                continue  # do NOT send to Gemini while sleeping
-
-            # ── Awake mode: forward audio to Gemini ───────────────────────────
             try:
                 # Use session.send_realtime_input(audio=...) — the non-deprecated API.
                 # session.send() is deprecated and its _parse_client_message() always
@@ -815,70 +569,37 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 if response.server_content is not None:
                     sc = response.server_content
 
-                    # User speech transcript
+                    # User speech transcript — buffered; persisted on turn_complete.
+                    # Live UI feedback (FastRTC/Gradio mode) still gets each chunk
+                    # via output_queue; the dashboard polls the DB and therefore
+                    # only sees one merged message per turn.
                     if hasattr(sc, "input_transcription") and sc.input_transcription:
                         txt = sc.input_transcription.text
                         if txt:
-                            # Update inactivity timer on every user utterance
-                            self._last_user_activity = time.monotonic()
-
-                            # Detect sleep word while awake.
-                            # Strip punctuation so "Goodbye, Zizi." → "goodbye zizi".
-                            # Also check phonetic variants because Gemini's STT often
-                            # transcribes the robot name "Zizi" as "Sisi", "Jiji", etc.
-                            _txt_clean = re.sub(r"[^\w\s]", "", txt.lower())
-                            _sleep_words = config.SLEEP_WORD.lower().split()
-                            # Build variants for the robot-name part of the sleep word.
-                            # "goodbye zizi" → first word "goodbye", name word "zizi"
-                            _ROBOT_NAME_VARIANTS = {"zizi", "sisi", "jiji", "sizi", "zisi", "cici", "gigi"}
-                            def _sleep_word_match(clean_txt: str) -> bool:
-                                if not _sleep_words:
-                                    return False
-                                if len(_sleep_words) == 1:
-                                    return _sleep_words[0] in clean_txt
-                                # Multi-word sleep word: first word must be present exactly,
-                                # last word matched against robot name variants.
-                                first = _sleep_words[0]
-                                last = _sleep_words[-1]
-                                name_variants = _ROBOT_NAME_VARIANTS | {last}
-                                words_in_txt = set(clean_txt.split())
-                                return first in words_in_txt and bool(words_in_txt & name_variants)
-                            if not self._is_sleeping and _sleep_word_match(_txt_clean):
-                                logger.info("Sleep word detected: %r — scheduling sleep", txt)
-                                # Tell Gemini explicitly to say goodbye so it doesn't resist
-                                if self._session is not None:
-                                    try:
-                                        await self._session.send_client_content(
-                                            turns={"role": "user", "parts": [{"text": "goodbye zizi"}]},
-                                            turn_complete=True,
-                                        )
-                                    except Exception:
-                                        pass
-                                asyncio.create_task(self._delayed_sleep(delay=5.0))
-
+                            self._user_transcript_buffer.append(txt)
                             await self.output_queue.put(
                                 AdditionalOutputs({"role": "user", "content": txt})
                             )
-                            # Log user speech to DB
-                            if self._session_id is not None:
-                                self._db.add_message(self._session_id, "user", txt)
 
-                    # Assistant speech transcript (output transcription)
+                    # Assistant speech transcript (output transcription) — buffered.
                     if hasattr(sc, "output_transcription") and sc.output_transcription:
                         txt = sc.output_transcription.text
                         if txt:
-                            # Log assistant speech to DB (for session continuity)
-                            if self._session_id is not None:
-                                self._db.add_message(self._session_id, "assistant", txt)
+                            self._assistant_transcript_buffer.append(txt)
 
-                    # User interrupted the AI — flush pending audio
+                    # User interrupted the AI — flush pending audio AND persist
+                    # whatever the assistant had said so far (otherwise that
+                    # partial turn would be lost from the session history).
                     if getattr(sc, "interrupted", False):
                         logger.info("User interrupted AI — flushing audio queue")
+                        self._flush_transcript_buffers()
                         if self._clear_queue is not None:
                             self._clear_queue()
 
-                    # Turn complete
+                    # Turn complete — persist the fully-buffered user + assistant
+                    # transcripts as one DB message each.
                     if getattr(sc, "turn_complete", False):
+                        self._flush_transcript_buffers()
                         hw = self.deps.head_wobbler
                         if hw is not None:
                             hw.reset()
