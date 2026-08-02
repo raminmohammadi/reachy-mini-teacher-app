@@ -65,6 +65,7 @@ class ToolDependencies:
     head_wobbler: Any | None = None  # HeadWobbler for audio-reactive motion
     motion_duration_s: float = 1.0
     profile_switch_event: Any | None = None  # asyncio.Event signalled on persona switch
+    user_identified_event: Any | None = None  # asyncio.Event signalled when the user is (re)identified
     # Session access — set by GeminiLiveHandler so tools can write to the DB
     session_db: Any | None = None          # SessionDB instance
     session_state: Any | None = None       # dict: {"session_id": int | None}

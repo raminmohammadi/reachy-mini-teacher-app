@@ -7,6 +7,7 @@ name — so that future sessions can greet the user by name without asking again
 import logging
 from typing import Any, Dict
 
+from reachy_mini_teacher_app.config import config
 from reachy_mini_teacher_app.tools.core_tools import Tool, ToolDependencies
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,14 @@ class RememberUserName(Tool):
             return {"status": "ignored", "reason": "no db"}
 
         try:
-            user_id = db.get_or_create_user(user_name)
+            # Snap the heard name to the closest configured user (e.g. "Bobb" → "Bob"
+            # or "باب" → "Bob" via the alias map) so mis-hearings / script
+            # variants don't create duplicate rows.
+            user_id = db.get_or_create_user(
+                user_name,
+                known_names=config.ENGLISH_TEACHER_USER_NAMES,
+                known_aliases=config.ENGLISH_TEACHER_USER_ALIASES,
+            )
             if session_id is not None:
                 db.assign_session_user(session_id, user_id)
                 logger.info(
@@ -59,5 +67,14 @@ class RememberUserName(Tool):
         except Exception as e:
             logger.error("remember_user_name failed: %s", e)
             return {"status": "error", "reason": str(e)}
+
+        # Signal the handler so it can reconnect with a system prompt that
+        # carries this user's recap, level, and known name.
+        event = getattr(deps, "user_identified_event", None)
+        if event is not None and session_id is not None:
+            try:
+                event.set()
+            except Exception as e:
+                logger.debug("user_identified_event.set() failed: %s", e)
 
         return {"status": "ok"}

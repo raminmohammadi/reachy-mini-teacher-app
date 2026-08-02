@@ -241,6 +241,20 @@ class TestDailyPlan:
         assert "احوالپرسی" in text
         assert "Hello" in text
 
+    def test_prompt_text_contains_unit_lock_language(self, db):
+        today = self._today()
+        db.get_or_create_daily_plan(today)
+        text = db.get_daily_plan_for_prompt(today)
+        # Explicit lock wording preventing topic drift
+        assert "قفل" in text
+        assert "چرخش سناریو" in text
+        # Forbidden topics must be named so Zizi cannot rationalize drifting
+        assert "آب‌وهوا" in text
+        assert "غذا" in text
+        assert "خرید" in text
+        # Session must only end on user's explicit goodbye
+        assert "خداحافظی" in text
+
     def test_prompt_text_contains_return_note_after_increment(self, db):
         today = self._today()
         db.get_or_create_daily_plan(today)
@@ -251,10 +265,11 @@ class TestDailyPlan:
     def test_prompt_text_empty_for_missing_date(self, db):
         assert db.get_daily_plan_for_prompt("1900-01-01") == ""
 
-    def test_curriculum_has_seven_units(self):
-        assert len(CURRICULUM) == 7
+    def test_curriculum_has_twenty_one_units_across_three_levels(self):
+        # 7 beginner + 7 intermediate + 7 advanced = 21 units, ids 1..21
+        assert len(CURRICULUM) == 21
         ids = [u["unit_id"] for u in CURRICULUM]
-        assert ids == list(range(1, 8))
+        assert ids == list(range(1, 22))
 
     def test_all_units_have_required_keys(self):
         for unit in CURRICULUM:
@@ -308,3 +323,156 @@ class TestNameMemory:
         sid = db.start_session()
         db.assign_session_user(sid, db.get_or_create_user("علی"))
         assert db.get_most_recent_user_name() == "علی"
+
+
+
+class TestCanonicalizeAndAliases:
+    """Alias/known_names resolution used to collapse duplicate rows."""
+
+    def test_known_names_collapses_misspelling(self, db):
+        uid = db.get_or_create_user("Bob", known_names=["Bob", "Alice"])
+        # "Bobb" is a common mishearing; fuzzy match should snap to Bob.
+        assert db.get_or_create_user("Bobb", known_names=["Bob", "Alice"]) == uid
+
+    def test_alias_map_snaps_script_variant(self, db):
+        aliases = {"باب": "Bob", "bab": "Bob"}
+        uid = db.get_or_create_user(
+            "Bob", known_names=["Bob"], known_aliases=aliases,
+        )
+        # Persian-script alias must resolve to the same canonical row.
+        assert db.get_or_create_user(
+            "باب", known_names=["Bob"], known_aliases=aliases,
+        ) == uid
+        # Alias lookup is case-insensitive.
+        assert db.get_or_create_user(
+            "BAB", known_names=["Bob"], known_aliases=aliases,
+        ) == uid
+
+    def test_no_known_names_preserves_original(self, db):
+        # Without known_names or aliases, near-matches stay separate.
+        a = db.get_or_create_user("Carol")
+        b = db.get_or_create_user("Carola")
+        assert a != b
+
+
+class TestMergeUsers:
+    def test_merge_moves_sessions(self, db):
+        src = db.get_or_create_user("Bobb")
+        tgt = db.get_or_create_user("Bob")
+        s = db.start_session(user_id=src)
+        db.merge_users(src, tgt)
+        # Source row is gone; session now belongs to target.
+        assert all(u["id"] != src for u in db.list_users())
+        assert db.get_user_name_for_session(s) == "Bob"
+
+
+class TestAutoLeveling:
+    def test_level_up_after_consecutive_passes(self, db):
+        uid = db.get_or_create_user("Learner")
+        for _ in range(db.PASS_TO_LEVEL_UP):
+            level, changed = db.record_session_result(uid, passed=True)
+        assert changed is True
+        assert level == 2
+
+    def test_level_down_after_consecutive_fails(self, db):
+        uid = db.get_or_create_user("Struggler")
+        db.set_user_level("Struggler", 2)
+        for _ in range(db.FAIL_TO_LEVEL_DOWN):
+            level, changed = db.record_session_result(uid, passed=False)
+        assert changed is True
+        assert level == 1
+
+    def test_pass_resets_fail_streak(self, db):
+        uid = db.get_or_create_user("Mixed")
+        db.set_user_level("Mixed", 2)
+        db.record_session_result(uid, passed=False)  # fail_streak=1
+        db.record_session_result(uid, passed=True)   # resets fail_streak
+        # One more fail should NOT drop the level (streak was reset).
+        _, changed = db.record_session_result(uid, passed=False)
+        assert changed is False
+        assert db.get_user_level("Mixed") == 2
+
+    def test_cannot_exceed_level_3(self, db):
+        uid = db.get_or_create_user("Top")
+        db.set_user_level("Top", 3)
+        for _ in range(db.PASS_TO_LEVEL_UP * 2):
+            level, _ = db.record_session_result(uid, passed=True)
+        assert level == 3
+
+    def test_cannot_go_below_level_1(self, db):
+        uid = db.get_or_create_user("Bottom")
+        for _ in range(db.FAIL_TO_LEVEL_DOWN * 2):
+            level, _ = db.record_session_result(uid, passed=False)
+        assert level == 1
+
+
+
+class TestPerUserDailyPlans:
+    """Two users must have independent daily plans on the same date."""
+
+    def _today(self):
+        return datetime.date.today().isoformat()
+
+    def _yesterday(self):
+        return (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+
+    def test_two_users_get_independent_plans(self, db):
+        today = self._today()
+        alice = db.get_or_create_user("Alice")
+        bob = db.get_or_create_user("Bob")
+        # Alice passes yesterday → advances to unit 2 today.
+        db.get_or_create_daily_plan(self._yesterday(), user_id=alice)
+        db.mark_daily_plan_result(self._yesterday(), passed=True, user_id=alice)
+        alice_plan = db.get_or_create_daily_plan(today, user_id=alice)
+        # Bob has no history → starts at unit 1 (band low).
+        bob_plan = db.get_or_create_daily_plan(today, user_id=bob)
+        assert alice_plan["unit_id"] == 2
+        assert bob_plan["unit_id"] == 1
+
+    def test_mark_result_scoped_to_user(self, db):
+        today = self._today()
+        alice = db.get_or_create_user("Alice")
+        bob = db.get_or_create_user("Bob")
+        db.get_or_create_daily_plan(today, user_id=alice)
+        db.get_or_create_daily_plan(today, user_id=bob)
+        db.mark_daily_plan_result(today, passed=True, user_id=alice)
+        # Bob's row must NOT be marked passed as a side effect.
+        assert db.get_or_create_daily_plan(today, user_id=alice)["passed"] == 1
+        assert db.get_or_create_daily_plan(today, user_id=bob)["passed"] == 0
+
+    def test_session_count_scoped_to_user(self, db):
+        today = self._today()
+        alice = db.get_or_create_user("Alice")
+        bob = db.get_or_create_user("Bob")
+        db.get_or_create_daily_plan(today, user_id=alice)
+        db.get_or_create_daily_plan(today, user_id=bob)
+        db.increment_daily_session_count(today, user_id=alice)
+        db.increment_daily_session_count(today, user_id=alice)
+        db.increment_daily_session_count(today, user_id=bob)
+        assert db.get_or_create_daily_plan(today, user_id=alice)["session_count"] == 2
+        assert db.get_or_create_daily_plan(today, user_id=bob)["session_count"] == 1
+
+    def test_anonymous_plan_isolated_from_user_plans(self, db):
+        # Legacy pre-identification plans (user_id=None) must not leak into
+        # a real user's plan on the same date.
+        today = self._today()
+        db.get_or_create_daily_plan(today)  # anonymous
+        db.mark_daily_plan_result(today, passed=True)  # anonymous passes
+        alice = db.get_or_create_user("Alice")
+        alice_plan = db.get_or_create_daily_plan(today, user_id=alice)
+        assert alice_plan["passed"] == 0
+        # Anonymous plan is unaffected by user activity.
+        db.mark_daily_plan_result(today, passed=False, user_id=alice)
+        assert db.get_or_create_daily_plan(today)["passed"] == 1
+
+    def test_prompt_text_scoped_to_user(self, db):
+        today = self._today()
+        alice = db.get_or_create_user("Alice")
+        db.get_or_create_daily_plan(today, user_id=alice)
+        # Another user's plan on the same day shouldn't appear in Alice's prompt.
+        bob = db.get_or_create_user("Bob")
+        db.get_or_create_daily_plan(self._yesterday(), user_id=bob)
+        db.mark_daily_plan_result(self._yesterday(), passed=True, user_id=bob)
+        db.get_or_create_daily_plan(today, user_id=bob)  # bob on unit 2
+        text = db.get_daily_plan_for_prompt(today, user_id=alice)
+        assert "واحد 1" in text  # alice's unit, not bob's unit 2

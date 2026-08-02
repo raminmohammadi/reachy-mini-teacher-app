@@ -4,7 +4,9 @@ Version=1.0
 Name=Stop Reachy Teacher
 GenericName=Stop the Reachy Mini Teacher App
 Comment=Stop the running Reachy Mini Teacher app
-Exec=/home/ramin/Downloads/reachy-mini-teacher-app/scripts/stop_teacher_app.sh
+# The Exec= line below is a template. scripts/install_launcher.sh rewrites
+# it to the absolute path of stop_teacher_app.sh at install time.
+Exec=INSTALL_DIR/scripts/stop_teacher_app.sh
 Icon=process-stop
 Terminal=false
 Categories=Education;Science;

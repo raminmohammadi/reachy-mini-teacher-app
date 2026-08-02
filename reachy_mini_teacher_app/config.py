@@ -85,15 +85,59 @@ class Config:
     VAD_PREFIX_PADDING_MS: int = int(os.getenv("VAD_PREFIX_PADDING_MS", "0"))
 
     # ── English Teacher users ─────────────────────────────────────────────
-    # Comma-separated list of allowed user names, e.g. "Alice,Bob".
-    # The AI will identify the speaker by voice and confirm against this list.
-    # Leave empty to let the AI ask for any name freely.
+    # Comma-separated list of allowed users. Each entry supports:
+    #   Name                       — canonical name, no extras
+    #   Name:m   /  Name:f         — canonical name + gender hint
+    #   Name/alias1/alias2:m       — canonical name + gender + one or more
+    #                                aliases (e.g. Persian-script spelling)
+    # Aliases collapse into the canonical name when the user is identified,
+    # so mis-hearings and script variants don't create duplicate DB rows.
+    # Examples:
+    #     ENGLISH_TEACHER_USERS=Alice,Bob
+    #     ENGLISH_TEACHER_USERS=Bob:m,Alice:f
+    #     ENGLISH_TEACHER_USERS=Bob/باب/Bab:m,Alice/آلیس:f
     _users_env = os.getenv("ENGLISH_TEACHER_USERS", "")
-    ENGLISH_TEACHER_USERS: list[str] = (
-        [u.strip() for u in _users_env.split(",") if u.strip()]
-        if _users_env.strip()
-        else []
-    )
+
+    @staticmethod
+    def _parse_users_env(raw: str) -> list[dict]:
+        """Parse ``Name[/alias…][:gender]`` entries.
+
+        Returns ``[{"name": ..., "gender": ..., "aliases": [...]}, …]``.
+        """
+        entries: list[dict] = []
+        if not raw or not raw.strip():
+            return entries
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if ":" in token:
+                head, _, gender = token.partition(":")
+                gender = gender.strip().lower()
+                if gender not in {"m", "f"}:
+                    gender = ""
+            else:
+                head, gender = token, ""
+            parts = [p.strip() for p in head.split("/") if p.strip()]
+            if not parts:
+                continue
+            name, aliases = parts[0], parts[1:]
+            entries.append({"name": name, "gender": gender, "aliases": aliases})
+        return entries
+
+    ENGLISH_TEACHER_USER_ENTRIES: list[dict] = _parse_users_env.__func__(_users_env)  # type: ignore[attr-defined]
+    ENGLISH_TEACHER_USER_NAMES: list[str] = [e["name"] for e in ENGLISH_TEACHER_USER_ENTRIES]
+    # Flat list of "heard-form → canonical" aliases used by SessionDB to
+    # snap variants into the canonical row. Includes both explicit aliases
+    # and each canonical name itself.
+    ENGLISH_TEACHER_USER_ALIASES: dict[str, str] = {
+        alias.strip().lower(): e["name"]
+        for e in ENGLISH_TEACHER_USER_ENTRIES
+        for alias in ([e["name"], *e.get("aliases", [])])
+    }
+    # Kept for backward compatibility with any external code / tests that
+    # read the plain string list.
+    ENGLISH_TEACHER_USERS: list[str] = list(ENGLISH_TEACHER_USER_NAMES)
 
     # ── Profiles / tools ─────────────────────────────────────────────────
     _profiles_directory_env = os.getenv("REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY")

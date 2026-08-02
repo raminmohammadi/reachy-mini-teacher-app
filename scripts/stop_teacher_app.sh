@@ -7,7 +7,7 @@
 
 set -u
 
-REPO_DIR="/home/ramin/Downloads/reachy-mini-teacher-app"
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_BIN="$REPO_DIR/venv/bin/reachy-mini-teacher-app"
 APP_LOG="$HOME/.local/share/reachy-mini-teacher-app/app.log"
 # Generous grace so the Gemini Live handler can finish handler.shutdown(),

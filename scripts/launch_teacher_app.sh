@@ -10,7 +10,7 @@
 
 set -u
 
-REPO_DIR="/home/ramin/Downloads/reachy-mini-teacher-app"
+REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="$REPO_DIR/venv"
 APP_BIN="$VENV_DIR/bin/reachy-mini-teacher-app"
 DAEMON_HOST="reachy-mini.local"

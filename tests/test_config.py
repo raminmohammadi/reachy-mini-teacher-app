@@ -122,3 +122,45 @@ class TestCollectProfileNames:
         from reachy_mini_teacher_app.config import _collect_profile_names
         assert _collect_profile_names(tmp_path / "nope") == set()
 
+
+
+
+# ── _parse_users_env (alias + gender syntax) ─────────────────────────────
+
+
+class TestParseUsersEnv:
+    def test_empty(self):
+        from reachy_mini_teacher_app.config import Config
+        assert Config._parse_users_env("") == []
+        assert Config._parse_users_env("   ") == []
+
+    def test_plain_names(self):
+        from reachy_mini_teacher_app.config import Config
+        out = Config._parse_users_env("Alice,Bob")
+        assert [e["name"] for e in out] == ["Alice", "Bob"]
+        assert all(e["gender"] == "" for e in out)
+        assert all(e["aliases"] == [] for e in out)
+
+    def test_gender_hints(self):
+        from reachy_mini_teacher_app.config import Config
+        out = Config._parse_users_env("Bob:m,Alice:f,Sam:x")
+        genders = {e["name"]: e["gender"] for e in out}
+        assert genders == {"Bob": "m", "Alice": "f", "Sam": ""}
+
+    def test_aliases_parsed(self):
+        from reachy_mini_teacher_app.config import Config
+        out = Config._parse_users_env("Bob/باب/Bab:m,Alice/آلیس:f")
+        bob = next(e for e in out if e["name"] == "Bob")
+        alice = next(e for e in out if e["name"] == "Alice")
+        assert set(bob["aliases"]) == {"باب", "Bab"}
+        assert bob["gender"] == "m"
+        assert alice["aliases"] == ["آلیس"]
+        assert alice["gender"] == "f"
+
+    def test_whitespace_tolerant(self):
+        from reachy_mini_teacher_app.config import Config
+        out = Config._parse_users_env("  Alice  /  Al  :  m  ,  Bob  ")
+        assert out[0]["name"] == "Alice"
+        assert out[0]["aliases"] == ["Al"]
+        assert out[0]["gender"] == "m"
+        assert out[1]["name"] == "Bob"

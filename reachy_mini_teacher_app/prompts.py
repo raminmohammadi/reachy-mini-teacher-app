@@ -1,5 +1,6 @@
 import re
 import sys
+import random
 import logging
 from pathlib import Path
 
@@ -61,15 +62,59 @@ def _expand_prompt_includes(content: str) -> str:
 _LEVEL_LABELS = {1: "مبتدی", 2: "متوسط", 3: "پیشرفته"}
 
 
+_GENDER_LABEL_FA = {"m": "مرد", "f": "زن"}
+_GENDER_VOICE_HINT_FA = {
+    "m": "صدای بم‌تر و پایین‌تر",
+    "f": "صدای زیرتر و بالاتر",
+}
+
+
 def _build_known_users_text() -> str:
-    """Build the {known_users_list} block from ENGLISH_TEACHER_USERS config."""
-    users = config.ENGLISH_TEACHER_USERS
-    if not users:
+    """Build the {known_users_list} block from ENGLISH_TEACHER_USERS config.
+
+    The order is shuffled on every call so no single user is systematically
+    listed first — this counters the bias where the AI defaults to the
+    first-named user when it is uncertain about the speaker.
+
+    When gender hints are configured (``Name:m`` / ``Name:f`` in the env var)
+    a Persian voice-based disambiguation line is added so the model can
+    lean on pitch/timbre in addition to what the speaker says.
+    """
+    entries = list(config.ENGLISH_TEACHER_USER_ENTRIES)
+    if not entries:
         return "کاربران این دستگاه تعریف نشده‌اند — از کاربر بپرس اسمش چیست."
-    if len(users) == 1:
-        return f"فقط یک نفر از این دستگاه استفاده می‌کند: **{users[0]}**"
-    items = "\n".join(f"- **{u}**" for u in users)
-    return f"کاربران این دستگاه:\n{items}"
+    if len(entries) == 1:
+        only = entries[0]
+        label = _GENDER_LABEL_FA.get(only["gender"], "")
+        suffix = f" ({label})" if label else ""
+        return f"فقط یک نفر از این دستگاه استفاده می‌کند: **{only['name']}**{suffix}"
+
+    random.shuffle(entries)
+    lines = []
+    have_any_gender = any(e["gender"] for e in entries)
+    for e in entries:
+        label = _GENDER_LABEL_FA.get(e["gender"], "")
+        hint = _GENDER_VOICE_HINT_FA.get(e["gender"], "")
+        if label and hint:
+            lines.append(f"- **{e['name']}** — {label}، معمولاً {hint}.")
+        elif label:
+            lines.append(f"- **{e['name']}** — {label}.")
+        else:
+            lines.append(f"- **{e['name']}**")
+    items = "\n".join(lines)
+    header = "کاربران این دستگاه (ترتیب هر بار تصادفی است):"
+    if have_any_gender:
+        footer = (
+            "\n\nبرای تشخیص گوینده، اول به **جنسیت صدا** (زیر/بم بودن) توجه کن، "
+            "نه به اینکه اسم چه کسی اول در لیست آمده. اگر مطمئن نیستی، بپرس "
+            "«ببخشید، الان کی داره صحبت می‌کنه؟» — هیچ‌وقت اسمی را حدس نزن."
+        )
+    else:
+        footer = (
+            "\n\nاگر از هویت گوینده مطمئن نیستی، بپرس «ببخشید، الان کی داره "
+            "صحبت می‌کنه؟» — هیچ‌وقت اسمی را حدس نزن."
+        )
+    return header + "\n" + items + footer
 
 
 def get_session_instructions(

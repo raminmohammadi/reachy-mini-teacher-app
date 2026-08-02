@@ -214,6 +214,11 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
 
         reconnect_delay = 2.0
         while not self._shutdown_requested:
+            # Planned reconnects (profile switch, deliberate refresh) should
+            # keep the mic buffer so wake phrases the user just uttered are
+            # not lost. Only error reconnects drain the queue.
+            _fast_reconnect = False
+
             # (Re)build config from current profile on every reconnect
             if self._profile_switch_event.is_set():
                 self._profile_switch_event.clear()
@@ -222,6 +227,7 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
                 if self._session_id is not None:
                     self._db.end_session(self._session_id, summary="Profile switched")
                 self._session_id = self._db.start_session()
+                _fast_reconnect = True
                 logger.info("Profile switch detected — new DB session %d", self._session_id)
 
             session_payload = self._build_openai_session_payload()
@@ -259,15 +265,18 @@ class OpenAIRealtimeHandler(AsyncStreamHandler):
             if self._shutdown_requested:
                 break
 
-            # Drain stale mic frames
-            while not self._audio_in_queue.empty():
-                try:
-                    self._audio_in_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            # Drain stale mic frames only on error reconnects. Fast reconnects
+            # (profile switch) preserve the queue so wake phrases survive.
+            if not _fast_reconnect:
+                while not self._audio_in_queue.empty():
+                    try:
+                        self._audio_in_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
-            logger.info("Reconnecting to OpenAI Realtime in %.1fs …", reconnect_delay)
-            await asyncio.sleep(reconnect_delay)
+            delay = 0.3 if _fast_reconnect else reconnect_delay
+            logger.info("Reconnecting to OpenAI Realtime in %.1fs …", delay)
+            await asyncio.sleep(delay)
 
         self._connection = None
         if head_wobbler is not None:

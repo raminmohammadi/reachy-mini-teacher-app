@@ -113,10 +113,10 @@ class TestTranscriptBuffering:
 
     def test_flush_combines_assistant_fragments(self):
         handler = self._make_handler()
-        for chunk in ("Hello ", "Khosro ", "jan", "!"):
+        for chunk in ("Hello ", "Bob ", "jan", "!"):
             handler._assistant_transcript_buffer.append(chunk)
         handler._flush_transcript_buffers()
-        handler._db.add_message.assert_called_once_with(42, "assistant", "Hello Khosro jan!")
+        handler._db.add_message.assert_called_once_with(42, "assistant", "Hello Bob jan!")
         assert handler._assistant_transcript_buffer == []
 
     def test_flush_combines_user_fragments(self):

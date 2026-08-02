@@ -171,9 +171,22 @@ class GeminiLiveHandler(AsyncStreamHandler):
             passed = result.get("passed", False) if result else False
             self._db.end_session(self._session_id, summary=summary)
             logger.info("Database session %d ended (summary=%s)", self._session_id, "yes" if summary else "no")
-            # Record whether the student passed today's unit
+            # Record whether the student passed today's unit (scoped to this user)
             if self._daily_plan is not None and self._today_date is not None:
-                self._db.mark_daily_plan_result(self._today_date, passed)
+                self._db.mark_daily_plan_result(
+                    self._today_date, passed, user_id=self._known_user_id
+                )
+            # Update the identified user's pass/fail streaks so their level
+            # auto-progresses over time without needing a manual set_user_level.
+            if self._known_user_id is not None:
+                new_level, changed = self._db.record_session_result(
+                    self._known_user_id, passed
+                )
+                if changed:
+                    logger.info(
+                        "Auto-level: user '%s' → level %d",
+                        self._known_user_name, new_level,
+                    )
         self._db.close()
         if self._session is not None:
             try:
@@ -217,10 +230,17 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 user_id=self._known_user_id,
             )
 
-            # Inject today's daily plan if one is active (english_teacher profile)
+            # Inject today's daily plan if one is active (english_teacher profile).
+            # Passing the user's level lets get_daily_plan_for_prompt clamp the
+            # stored unit into that level's band so an intermediate/advanced
+            # user doesn't get pushed back into beginner content.
             daily_plan_text: Optional[str] = None
             if self._daily_plan is not None and self._today_date is not None:
-                daily_plan_text = self._db.get_daily_plan_for_prompt(self._today_date)
+                daily_plan_text = self._db.get_daily_plan_for_prompt(
+                    self._today_date,
+                    user_level=self._known_user_level,
+                    user_id=self._known_user_id,
+                )
 
             instructions = get_session_instructions(
                 recap=recap,
@@ -276,8 +296,8 @@ class GeminiLiveHandler(AsyncStreamHandler):
             # forcing them to repeat themselves 2-3 times before the model responds.
             # LOW sensitivity waits longer before declaring end-of-speech, which
             # is the right tradeoff for a language-learning / elderly-user app.
-            silence_ms = config.VAD_SILENCE_DURATION_MS or 1200   # ms; 1.2 s comfortable pause
-            prefix_ms  = config.VAD_PREFIX_PADDING_MS  or 300     # ms; capture utterance start
+            silence_ms = config.VAD_SILENCE_DURATION_MS or 700    # ms; snappier turn end for elderly speakers
+            prefix_ms  = config.VAD_PREFIX_PADDING_MS  or 400     # ms; capture wake-word onset ("hi zizi")
             # NOTE: all field names MUST be snake_case — the SDK's Pydantic models
             # silently ignore unknown camelCase keys, so wrong names = no effect.
             aad = gtypes.AutomaticActivityDetection(
@@ -329,23 +349,23 @@ class GeminiLiveHandler(AsyncStreamHandler):
         self._profile_switch_event = asyncio.Event()
         self.deps.profile_switch_event = self._profile_switch_event
 
+        # Set up user-identification event so remember_user_name can trigger a
+        # reconnect that rebuilds the system prompt with the right user's recap.
+        self._user_identified_event = asyncio.Event()
+        self.deps.user_identified_event = self._user_identified_event
+
         # Start a new database session
         self._session_id = self._db.start_session()
         self._session_state["session_id"] = self._session_id
         logger.info("Database session started: %d", self._session_id)
 
-        # Look up known user name, id and level from previous sessions
-        self._known_user_name = self._db.get_most_recent_user_name()
-        if self._known_user_name:
-            self._known_user_id = self._db.get_or_create_user(self._known_user_name)
-            self._known_user_level = self._db.get_user_level(self._known_user_name)
-            logger.info(
-                "Known user from previous session: '%s' (id=%s, level=%d)",
-                self._known_user_name, self._known_user_id, self._known_user_level,
-            )
-        else:
-            self._known_user_id = None
-            self._known_user_level = 1
+        # Start the session neutral — the AI must identify the user before any
+        # per-user context (recap, level) is loaded into the prompt. This avoids
+        # the AI greeting the wrong person and then claiming "first session"
+        # when the recap doesn't match the actual user.
+        self._known_user_name = None
+        self._known_user_id = None
+        self._known_user_level = 1
 
         # Load today's curriculum plan (only for english_teacher profile)
         from reachy_mini_teacher_app.config import config as _cfg
@@ -389,14 +409,44 @@ class GeminiLiveHandler(AsyncStreamHandler):
                 self._session_state["session_id"] = self._session_id
                 self._daily_plan = None
                 self._today_date = None
-                self._known_user_name = self._db.get_most_recent_user_name()
-                if self._known_user_name:
-                    self._known_user_id = self._db.get_or_create_user(self._known_user_name)
-                    self._known_user_level = self._db.get_user_level(self._known_user_name)
-                else:
-                    self._known_user_id = None
-                    self._known_user_level = 1
+                # Reset to neutral — new persona will identify the user from scratch.
+                self._known_user_name = None
+                self._known_user_id = None
+                self._known_user_level = 1
                 logger.info("Profile switch detected — new DB session %d", self._session_id)
+
+            # remember_user_name was just called: refresh the in-memory user
+            # state from the DB and reconnect so the new system prompt carries
+            # the right recap, level, and known_user_name for this person.
+            if self._user_identified_event.is_set():
+                self._user_identified_event.clear()
+                if self._session_id is not None:
+                    new_name = self._db.get_user_name_for_session(self._session_id)
+                    if new_name and new_name != self._known_user_name:
+                        self._known_user_name = new_name
+                        self._known_user_id = self._db.get_or_create_user(
+                            new_name,
+                            known_names=config.ENGLISH_TEACHER_USER_NAMES,
+                            known_aliases=config.ENGLISH_TEACHER_USER_ALIASES,
+                        )
+                        self._known_user_level = self._db.get_user_level(new_name)
+                        self._needs_config_rebuild = True
+                        _fast_reconnect = True
+                        # Switch today's plan to this user's per-user row so
+                        # their unit progression is independent of others.
+                        if self._today_date is not None:
+                            self._daily_plan = self._db.get_or_create_daily_plan(
+                                self._today_date,
+                                user_level=self._known_user_level,
+                                user_id=self._known_user_id,
+                            )
+                            self._db.increment_daily_session_count(
+                                self._today_date, user_id=self._known_user_id
+                            )
+                        logger.info(
+                            "User identified: '%s' (id=%s, level=%d) — reconnecting to refresh prompt",
+                            self._known_user_name, self._known_user_id, self._known_user_level,
+                        )
 
             live_config = self._build_live_config(gtypes)
 
@@ -456,12 +506,17 @@ class GeminiLiveHandler(AsyncStreamHandler):
             if self._shutdown_requested:
                 break
 
-            # Drain stale mic frames so the new session starts clean
-            while not self._audio_in_queue.empty():
-                try:
-                    self._audio_in_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            # Drain stale mic frames on error reconnects so we don't replay
+            # audio the previous session already consumed. On *fast* reconnects
+            # (planned: profile switch, user identified) the mic buffer is
+            # kept intact — otherwise a wake phrase the user just uttered
+            # would be lost and they'd have to repeat "hi zizi" several times.
+            if not _fast_reconnect:
+                while not self._audio_in_queue.empty():
+                    try:
+                        self._audio_in_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
             delay = 0.3 if _fast_reconnect else reconnect_delay
             logger.info("Reconnecting to Gemini Live in %.1fs …", delay)
@@ -483,6 +538,11 @@ class GeminiLiveHandler(AsyncStreamHandler):
             # Break out if a profile switch was requested
             if self._profile_switch_event.is_set():
                 logger.info("Profile switch detected in _send_loop — breaking to reconnect")
+                return
+            # Break out if the user was just identified so we can reconnect
+            # with a rebuilt prompt that carries this user's recap.
+            if self._user_identified_event.is_set():
+                logger.info("User identified in _send_loop — breaking to reconnect")
                 return
             try:
                 input_sr, audio_frame = await asyncio.wait_for(
